@@ -1,0 +1,5 @@
+# Replace gateway.example.com with the hostname pointing at this VM.
+# Caddy will fetch a Let's Encrypt cert automatically on first start.
+gateway.example.com {
+    reverse_proxy gateway:8080
+}

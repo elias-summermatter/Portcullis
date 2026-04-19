@@ -1,0 +1,38 @@
+services:
+  gateway:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    ports:
+      - "51820:51820/udp"      # WireGuard
+    expose:
+      - "8080"                 # web UI — only to caddy, not the internet
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./logs:/app/logs
+      - ./state:/app/state
+    restart: unless-stopped
+
+  # Reverse proxy + automatic TLS via Let's Encrypt. Requires DNS pointing
+  # at the VM and ports 80/443 open.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
