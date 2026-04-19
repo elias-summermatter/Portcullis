@@ -41,6 +41,21 @@ def _run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subpro
                           capture_output=capture)
 
 
+def _derive_config_name(endpoint: str) -> str:
+    """First label of the WG endpoint hostname (or "gateway" if it's an IP).
+    Used as the filename prefix and, via wg-quick, the network interface
+    name on the client — so must stay short and [a-z0-9-]."""
+    import re
+    host = endpoint.split(":", 1)[0]
+    try:
+        ipaddress.ip_address(host)
+        return "gateway"
+    except ValueError:
+        first = host.split(".", 1)[0].lower()
+        sanitized = re.sub(r"[^a-z0-9-]", "-", first).strip("-")
+        return sanitized or "gateway"
+
+
 @dataclass
 class Service:
     name: str
@@ -68,6 +83,7 @@ class Gateway:
         self.network = ipaddress.ip_network(config.get("wg_network", "10.77.0.0/24"))
         self.listen_port = int(config.get("wg_listen_port", 51820))
         self.endpoint = config["wg_endpoint"]  # "gateway.example.com:51820"
+        self.config_name = config.get("wg_config_name") or _derive_config_name(self.endpoint)
         self.egress_iface = config.get("egress_interface", "eth0")
         self.client_dns = config.get("wg_client_dns")  # optional
         self.state_dir = Path(config.get("state_dir", "state"))
