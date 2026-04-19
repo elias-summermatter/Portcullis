@@ -102,7 +102,7 @@ def create_app(config: dict) -> Flask:
         cfg_text, wg_ip = gateway.register_user(u)
         audit.record("wg_config_generated", user=u, ip=request.remote_addr,
                      wg_ip=wg_ip)
-        filename = f"{gateway.config_name}-{u}.conf"
+        filename = f"{gateway.config_name}.conf"
         return Response(
             cfg_text,
             mimetype="text/plain",

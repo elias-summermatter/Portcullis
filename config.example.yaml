@@ -26,11 +26,11 @@ wg_interface: "wg0"
 wg_network: "10.77.0.0/24"
 wg_listen_port: 51820
 
-# Filename prefix for downloaded configs → "<prefix>-<user>.conf". Also
-# becomes the wg-quick interface name on the client, so must stay short
-# and [a-z0-9-]. If unset, derived from the first label of wg_endpoint
-# ("gateway.example.com" → "gateway"; an IP → literal "gateway").
-# wg_config_name: "gateway"
+# Filename of downloaded configs → "<name>.conf". Also becomes the wg-quick
+# interface name on the client, so must be ≤ 15 chars and [a-z0-9-]. If
+# unset, derived from the first label of wg_endpoint ("gateway.example.com"
+# → "gateway"; an IP → literal "gateway").
+# wg_config_name: "wepublish-gw"
 
 # Network interface used for egress to the real services. Inside the Docker
 # container this is typically eth0.
