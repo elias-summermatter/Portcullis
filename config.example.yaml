@@ -60,6 +60,29 @@ users:
 admins:
   - admin
 
+# ---- GitHub OAuth (optional) -------------------------------------------
+#
+# When enabled, the login page shows a "Sign in with GitHub" button. After
+# the OAuth dance, the user is only allowed in if they are an active member
+# of `required_team` inside `required_org` (or `required_org` if no team
+# is set). Membership is re-checked on every login, never cached.
+#
+# Register an OAuth App at https://github.com/settings/developers with the
+# callback URL https://<your-gateway-hostname>/oauth/github/callback and
+# paste the client_id / client_secret below.
+
+# oauth:
+#   github:
+#     client_id: "Iv1.xxxxxxxxxxxxxxxx"
+#     client_secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+#     required_org: "wepublish"
+#     required_team: "infrastructure"   # team slug; omit to check org only
+#     admin_team: "gateway-admins"      # optional: members of this team
+#                                       #   are granted admin in the UI
+#     reverify_interval: 300            # seconds — re-check team membership
+#                                       #   this often; kicks the user out
+#                                       #   if they've been removed
+
 # ---- Services -----------------------------------------------------------
 #
 # Each service's `hostname` is resolved at startup (and refreshed every
