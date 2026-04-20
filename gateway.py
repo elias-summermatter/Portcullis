@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 from wg import Keypair, generate_keypair, generate_preshared_key, render_client_config
 
 log = logging.getLogger(__name__)
@@ -33,6 +35,9 @@ EXTEND_STEP = 3600
 IPTABLES_CHAIN = "SIG_FORWARD"
 RESOLVE_INTERVAL = 300  # re-resolve service hostnames every 5min
 REAP_INTERVAL = 10
+LOCAL_CHECK_INTERVAL = 300          # 5min TCP reachability probe from the gateway
+PUBLIC_CHECK_INTERVAL = 6 * 3600    # 6h portchecker.io query
+PORTCHECKER_URL = "https://portchecker.io/api/query"
 
 
 def _run(cmd: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
@@ -99,6 +104,16 @@ class Gateway:
         # whenever an admin revokes or deletes a user — closes the gap where
         # a stolen session cookie could re-register after revoke/delete.
         self.user_session_cutoff: dict[str, float] = {}
+
+        # Service health: populated by background loops. Each entry is:
+        #   {local_ok: bool|None, local_checked_at: float|None,
+        #    public_open: bool|None, public_checked_at: float|None}
+        # None = not yet tested / test failed / feature disabled.
+        sh = config.get("service_health") or {}
+        self.local_check_interval = int(sh.get("local_interval", LOCAL_CHECK_INTERVAL))
+        self.public_check_enabled = bool(sh.get("public_check_enabled", False))
+        self.public_check_interval = int(sh.get("public_check_interval", PUBLIC_CHECK_INTERVAL))
+        self.service_health: dict[str, dict] = {}
 
         self.services: dict[str, Service] = {}
         for s in config.get("services", []):
@@ -201,6 +216,10 @@ class Gateway:
         self._resolve_all_services()
         threading.Thread(target=self._resolver_loop, daemon=True, name="resolver").start()
         threading.Thread(target=self._reaper_loop, daemon=True, name="reaper").start()
+        threading.Thread(target=self._local_check_loop, daemon=True, name="local-health").start()
+        if self.public_check_enabled:
+            threading.Thread(target=self._public_check_loop, daemon=True,
+                             name="public-health").start()
 
     # --- WG / iptables setup ---------------------------------------------
 
@@ -566,6 +585,179 @@ class Gateway:
                 self._resolve_all_services()
             except Exception as e:
                 log.warning("resolver pass failed: %s", e)
+
+    # --- service health checks -------------------------------------------
+    #
+    # Two independent probes per service:
+    #   * local  — TCP connect from the gateway itself. Used to prove the
+    #              service is alive on the internal network. Green tag.
+    #   * public — query a third-party probe (portchecker.io) to see if the
+    #              service answers from the open internet. If yes, something
+    #              is wrong — the whole point of the gateway is that the
+    #              service should NOT be publicly reachable. Red tag.
+    #
+    # Both loops are fail-safe: any exception (API outage, DNS glitch,
+    # connection refused, JSON parse error) is caught, logged, and reflected
+    # as a "check failed" state (`local_error` / `public_error` set) so the
+    # UI can surface "I don't know" distinctly from a healthy/unhealthy
+    # result. A failed check never raises out of the thread.
+
+    def _check_local_reachability(self, svc: Service) -> tuple[Optional[bool], Optional[str]]:
+        """TCP connect from the gateway to the service. Returns (ok, error).
+        ok is True/False, or None if the test couldn't run. error is a short
+        reason string when ok is None/False."""
+        if not svc.port:
+            return None, "no port configured"
+        target = svc.hostname
+        if not target and svc.resolved:
+            target = svc.resolved[0].split("/", 1)[0]
+        if not target:
+            return None, "no hostname/resolved IP"
+        try:
+            with socket.create_connection((target, svc.port), timeout=3):
+                return True, None
+        except (socket.timeout, TimeoutError):
+            return False, "timeout"
+        except ConnectionRefusedError:
+            return False, "connection refused"
+        except OSError as e:
+            return False, f"{type(e).__name__}"
+
+    def _check_public_exposure(self, svc: Service) -> tuple[Optional[bool], Optional[str]]:
+        """Query portchecker.io for whether the service is reachable from
+        the public internet. Returns (publicly_open, error). publicly_open
+        is True/False, or None if the check couldn't complete (API down,
+        timeout, unexpected response shape)."""
+        if not svc.hostname:
+            return None, "no public hostname"
+        if not svc.port:
+            return None, "no port configured"
+        try:
+            r = requests.post(
+                PORTCHECKER_URL,
+                json={"host": svc.hostname, "ports": [svc.port]},
+                timeout=15,
+            )
+        except requests.RequestException as e:
+            return None, f"portchecker unreachable: {type(e).__name__}"
+        if r.status_code != 200:
+            return None, f"portchecker HTTP {r.status_code}"
+        try:
+            data = r.json()
+        except ValueError:
+            return None, "portchecker returned non-JSON"
+        # Tolerant parsing — portchecker's response shape has varied over
+        # time. Known forms: {"check":[{"port":N,"status":"open"}]} or
+        # {"ports":[{"port":N,"status":"open"}]}. Accept either.
+        entries = data.get("check") or data.get("ports") or []
+        if not isinstance(entries, list):
+            return None, "portchecker returned unexpected shape"
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status") or entry.get("state") or "").lower()
+            if "open" in status:
+                return True, None
+        return False, None
+
+    def _local_check_loop(self) -> None:
+        # Run an initial pass immediately so the dashboard has data within
+        # the first few seconds of boot, not only after one interval.
+        self._run_local_checks()
+        while True:
+            time.sleep(self.local_check_interval)
+            self._run_local_checks()
+
+    def _run_local_checks(self) -> None:
+        for svc in list(self.services.values()):
+            try:
+                ok, err = self._check_local_reachability(svc)
+            except Exception as e:  # defensive: never let the thread die
+                log.warning("local check for %s raised: %s", svc.name, e)
+                ok, err = None, "internal error"
+            entry = self.service_health.setdefault(svc.name, {})
+            entry["local_ok"] = ok
+            entry["local_error"] = err
+            entry["local_checked_at"] = time.time()
+            new_state = "ok" if ok is True else ("unreachable" if ok is False else "check_error")
+            self._record_health_transition(svc.name, "local", new_state, err)
+
+    def _record_health_transition(
+        self, svc_name: str, probe: str, new_state: str, reason: Optional[str],
+    ) -> None:
+        """Emit an audit event when a service crosses the OK ↔ not-OK line.
+
+        Collapses every non-OK state (unreachable, check_error, exposed)
+        into a single "down" bucket for audit purposes, so a single
+        incident produces exactly one `service_health_fail` and exactly
+        one `service_health_ok` on recovery — no matter how the underlying
+        failure shape shifts between checks. The precise state + reason
+        are still attached to the fail event so admins can see *why*.
+
+        Initial startup state of "ok" is silent; initial state of "down"
+        is logged so a crash-and-recovery still surfaces real problems."""
+        entry = self.service_health.setdefault(svc_name, {})
+        key = f"{probe}_audit_state"
+        prev = entry.get(key)
+        audit_state = "ok" if new_state == "ok" else "down"
+        if prev == audit_state:
+            return
+        entry[key] = audit_state
+        if prev is None and audit_state == "ok":
+            return
+        event = "service_health_ok" if audit_state == "ok" else "service_health_fail"
+        self.audit.record(
+            event,
+            service=svc_name,
+            probe=probe,
+            state=new_state,
+            reason=reason or None,
+        )
+
+    def _public_check_loop(self) -> None:
+        self._run_public_checks()
+        while True:
+            time.sleep(self.public_check_interval)
+            self._run_public_checks()
+
+    def _run_public_checks(self) -> None:
+        for svc in list(self.services.values()):
+            try:
+                is_open, err = self._check_public_exposure(svc)
+            except Exception as e:
+                log.warning("public check for %s raised: %s", svc.name, e)
+                is_open, err = None, "internal error"
+            entry = self.service_health.setdefault(svc.name, {})
+            entry["public_open"] = is_open
+            entry["public_error"] = err
+            entry["public_checked_at"] = time.time()
+            # For the public probe, "ok" means NOT publicly reachable —
+            # that's the desired state. "exposed" is the bad state.
+            if is_open is True:
+                new_state = "exposed"
+            elif is_open is False:
+                new_state = "ok"
+            else:
+                new_state = "check_error"
+            self._record_health_transition(svc.name, "public", new_state, err)
+
+    def service_health_snapshot(self) -> dict[str, dict]:
+        """Return a plain-dict copy of current health state, safe to ship
+        over the API."""
+        snapshot: dict[str, dict] = {}
+        for name, entry in self.service_health.items():
+            snapshot[name] = dict(entry)
+        # Fill in unknown placeholders for services that haven't been
+        # probed yet, so the frontend can reason uniformly.
+        for name in self.services:
+            snapshot.setdefault(name, {
+                "local_ok": None, "local_error": "pending", "local_checked_at": None,
+                "public_open": None,
+                "public_error": None if self.public_check_enabled else "disabled",
+                "public_checked_at": None,
+            })
+        snapshot["__meta__"] = {"public_check_enabled": self.public_check_enabled}
+        return snapshot
 
     # --- grants (activation) ---------------------------------------------
 

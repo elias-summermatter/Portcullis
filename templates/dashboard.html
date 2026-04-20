@@ -69,6 +69,13 @@
     .chip-active { background: rgba(166, 227, 161, 0.15); color: #a6e3a1; }
     .chip-blocked { background: rgba(243, 139, 168, 0.15); color: #f38ba8; }
     .chip-approved { background: rgba(203, 166, 247, 0.15); color: #cba6f7; }
+
+    .health-chip { display: inline-block; padding: 0.12rem 0.5rem; border-radius: 10px; font-size: 0.72rem; margin-left: 0.35rem; font-weight: 500; vertical-align: middle; font-family: ui-monospace, monospace; }
+    .health-reachable { background: rgba(166, 227, 161, 0.15); color: #a6e3a1; }
+    .health-down { background: rgba(108, 112, 134, 0.25); color: #a6adc8; }
+    .health-exposed { background: rgba(243, 139, 168, 0.2); color: #f38ba8; font-weight: 600; }
+    .health-safe { background: rgba(166, 227, 161, 0.1); color: #a6e3a1; }
+    .health-unknown { background: rgba(249, 226, 175, 0.15); color: #f9e2af; }
     .chip button { background: transparent; color: inherit; border: 0; padding: 0 0.2rem; margin: 0; font-size: 0.9rem; line-height: 1; cursor: pointer; opacity: 0.7; }
     .chip button:hover { opacity: 1; }
     .block-picker { background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a; border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.8rem; margin-top: 0.15rem; }
@@ -175,7 +182,7 @@
     <tbody id="rows">
       {% for svc in services %}
       <tr data-name="{{ svc.name }}" data-requires-approval="{{ 'true' if svc.requires_approval else 'false' }}">
-        <td><strong>{{ svc.name }}</strong></td>
+        <td><strong>{{ svc.name }}</strong><span class="health-cell"></span></td>
         <td class="target">
           {% if svc.hostname %}{{ svc.hostname }}{% endif %}
           {% if svc.port %}:{{ svc.port }}{% endif %}
@@ -220,6 +227,7 @@
       <option value="">all events</option>
       <option value="auth">auth (login/logout)</option>
       <option value="grant">grants (activate/extend/deactivate)</option>
+      <option value="health">service health</option>
       <option value="error">errors</option>
     </select>
     <select id="f-service">
@@ -262,6 +270,7 @@ const MAX_SECONDS = 8 * 3600;
 let grants = {};
 let blockedForMe = new Set();
 let approvedForMe = new Set();
+let serviceHealth = {};
 let hasConfig = document.body.dataset.hasConfig === 'true';
 const isAdmin = document.body.dataset.isAdmin === 'true';
 const currentUser = {{ user | tojson }};
@@ -335,8 +344,29 @@ async function refresh() {
     hasConfig = !!data.has_config;
     blockedForMe = new Set(data.blocked || []);
     approvedForMe = new Set(data.approved || []);
+    serviceHealth = data.service_health || {};
   } catch (e) { /* network hiccup, keep last state */ }
   render();
+}
+
+function renderHealthChips(name) {
+  const h = serviceHealth[name] || {};
+  const chips = [];
+  if (h.local_ok === true) {
+    chips.push('<span class="health-chip health-reachable" title="TCP-reachable from the gateway">reachable</span>');
+  } else if (h.local_ok === false) {
+    chips.push(`<span class="health-chip health-down" title="Gateway cannot reach this service${h.local_error ? ' (' + escapeHtml(h.local_error) + ')' : ''}">unreachable</span>`);
+  } else if (h.local_error && h.local_error !== 'pending') {
+    chips.push(`<span class="health-chip health-unknown" title="Local check failed: ${escapeHtml(h.local_error)}">check failed</span>`);
+  }
+  if (h.public_open === true) {
+    chips.push('<span class="health-chip health-exposed" title="Portchecker.io sees this service on the public internet — it should NOT be reachable from outside the gateway. Investigate immediately.">publicly exposed</span>');
+  } else if (h.public_open === false) {
+    chips.push('<span class="health-chip health-safe" title="Not reachable from the public internet — as intended">not public</span>');
+  } else if (h.public_error && h.public_error !== 'disabled') {
+    chips.push(`<span class="health-chip health-unknown" title="Public check failed: ${escapeHtml(h.public_error)}">public check failed</span>`);
+  }
+  return chips.join('');
 }
 
 function render() {
@@ -346,6 +376,8 @@ function render() {
     const exp = grants[name];
     const statusCell = tr.querySelector('.status');
     const actionsCell = tr.querySelector('.actions');
+    const healthCell = tr.querySelector('.health-cell');
+    if (healthCell) healthCell.innerHTML = renderHealthChips(name);
     if (exp && exp > now) {
       const remaining = exp - now;
       const atMax = remaining >= MAX_SECONDS - 30;
@@ -617,6 +649,8 @@ function fmtAuditDetail(e) {
   if (e.expires_at) {
     parts.push(`until ${FMT_TIME.format(new Date(e.expires_at * 1000))}`);
   }
+  if (e.probe) parts.push(`probe: ${e.probe}`);
+  if (e.state) parts.push(`state: ${e.state}`);
   if (e.reason) parts.push(`reason: ${e.reason}`);
   if (e.via) parts.push(`via: ${e.via}`);
   if (e.target_user) parts.push(`target: ${e.target_user}`);

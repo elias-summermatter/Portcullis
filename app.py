@@ -511,6 +511,7 @@ def create_app(config: dict) -> Flask:
             "grants": gateway.status_for_user(u),
             "blocked": list(user_state.get("blocked_services", [])),
             "approved": list(user_state.get("approved_services", [])),
+            "service_health": gateway.service_health_snapshot(),
         })
 
     @app.route("/wg-config", methods=["POST"])

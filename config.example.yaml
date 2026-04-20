@@ -23,6 +23,28 @@ session_cookie_secure: false
 audit_log_path: "logs/audit.log"
 audit_rotation: "weekly"   # weekly | daily | off
 
+# ---- Service health checks ---------------------------------------------
+#
+# Two independent probes per configured service surface coloured chips on
+# the dashboard and fire a `service_health_fail` / `service_health_ok`
+# pair in the audit log on every OK ↔ down transition (deliberately
+# debounced — one event per incident, not one per check).
+#
+# local  — TCP connect from the gateway itself, every local_interval.
+#          Green "reachable" chip = service is up + routable from here.
+#          Always on.
+# public — POST to https://portchecker.io every public_check_interval to
+#          ask whether the service is reachable from the open internet.
+#          A red "publicly exposed" chip means the whole premise of the
+#          gateway is broken for that service — investigate immediately.
+#          OFF BY DEFAULT; opt in by setting public_check_enabled: true.
+#          This sends your service hostname + port to portchecker.io.
+
+service_health:
+  local_interval: 300            # seconds between local TCP probes
+  public_check_enabled: false    # query portchecker.io? (sends hostname)
+  public_check_interval: 21600   # seconds between public probes (6h)
+
 # ---- WireGuard gateway --------------------------------------------------
 
 # UDP endpoint the client will dial. Must be reachable from every user's

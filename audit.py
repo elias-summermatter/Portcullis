@@ -22,12 +22,13 @@ CATEGORY = {
     "service_blocked": "admin", "service_unblocked": "admin",
     "service_approved": "admin", "service_approval_revoked": "admin",
     "user_locked": "admin", "user_unlocked": "admin",
+    "service_health_ok": "health", "service_health_fail": "health",
 }
 
 
 def _categories(event: str) -> list[str]:
     cats = [CATEGORY.get(event, "other")]
-    if event == "login_failed":
+    if event in ("login_failed", "service_health_fail"):
         cats.append("error")
     return cats
 

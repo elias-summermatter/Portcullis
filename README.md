@@ -207,6 +207,38 @@ password fields automatically, leaving just the GitHub button.
 
 ---
 
+## Service health chips
+
+Every service row on the dashboard now carries two coloured tags driven
+by background probes:
+
+- **Local (every 5 min, always on):** TCP-connect from the gateway to
+  the service. Shows *reachable* (green) when the service answers,
+  *unreachable* (gray) when the gateway can't open a socket, or *check
+  failed* (amber) on a transient local error. A chronically unreachable
+  service means the tunnel route will break too — investigate.
+- **Public (every 6 h, opt-in):** POST to `portchecker.io` asking
+  whether the service's hostname + port answer from the open internet.
+  Shows *not public* (green) when it doesn't, *publicly exposed* (red
+  bold) when it does — which means the gateway is being bypassed and
+  whatever is exposed should be firewalled off immediately. A failed
+  probe (API outage, etc.) is shown as *public check failed* (amber),
+  distinct from either outcome — an outage never masquerades as green.
+
+Both checks are fully fail-safe: any exception is caught, logged, and
+surfaced as an amber "check failed" chip. The app never breaks because
+of a probe.
+
+Transitions are written to the audit log as `service_health_fail` /
+`service_health_ok`, one event per incident (debounced — flapping
+between `unreachable` and `check_error` does not re-log). The event
+includes `probe=local|public`, the precise `state`, and a `reason`
+string.
+
+Enable the public probe with `service_health.public_check_enabled:
+true` in `config.yaml`. The local probe is always on; tune its cadence
+with `service_health.local_interval`.
+
 ## Day-to-day operations
 
 ### Add a password user
@@ -442,7 +474,7 @@ Events you'll see: `login`, `login_failed`, `logout`, `session_revoked`,
 `deactivate`, `grant_expired`, `user_revoked`, `admin_deactivate`,
 `service_blocked`, `service_unblocked`, `service_approved`,
 `service_approval_revoked`, `user_locked`, `user_unlocked`,
-`user_deleted`.
+`user_deleted`, `service_health_ok`, `service_health_fail`.
 
 Rotation: every Monday 00:00 UTC (configurable) the live file is renamed
 to `audit-YYYY-MM-DD.log.gz`, gzipped, and a new live file starts.
