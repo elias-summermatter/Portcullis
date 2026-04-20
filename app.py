@@ -71,8 +71,8 @@ def create_app(config: dict) -> Flask:
     )
     limiter.init_app(app)
 
-    users = config.get("users", {})
-    admins = set(config.get("admins", []))
+    users = config.get("users") or {}
+    admins = set(config.get("admins") or [])
     github_cfg = (config.get("oauth") or {}).get("github")
     reverify_interval = int((github_cfg or {}).get("reverify_interval", 300))
     audit = AuditLog(config.get("audit_log_path"))
