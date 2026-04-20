@@ -9,7 +9,7 @@
   <title>Secure Infrastructure Gateway</title>
   <style>
     :root { color-scheme: dark; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #1e1e2e; color: #cdd6f4; margin: 0; padding: 2rem; max-width: 1100px; margin: 0 auto; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #1e1e2e; color: #cdd6f4; margin: 0 auto; padding: 2rem; max-width: 1800px; }
     header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
     .brand { display: flex; align-items: center; gap: 0.85rem; }
     .brand img { width: 40px; height: 40px; flex-shrink: 0; filter: drop-shadow(0 2px 6px rgba(137, 180, 250, 0.25)); }
@@ -32,7 +32,11 @@
     .countdown { font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
     .until { color: #6c7086; font-size: 0.85em; font-family: ui-monospace, monospace; margin-left: 0.25rem; }
 
-    button { padding: 0.45rem 0.9rem; margin-right: 0.25rem; border: 0; border-radius: 5px; cursor: pointer; font-weight: 500; font-size: 0.9rem; }
+    button { padding: 0.45rem 0.9rem; margin: 0 0.25rem 0.35rem 0; border: 0; border-radius: 5px; cursor: pointer; font-weight: 500; font-size: 0.9rem; }
+    /* Any action-cell wraps its buttons so they keep a visible gap when the
+       column is narrow enough to force a line break. */
+    .btn-group { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
+    .btn-group > button { margin: 0; }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
     .btn-primary { background: #89b4fa; color: #1e1e2e; }
     .btn-primary:hover:not(:disabled) { background: #74c7ec; }
@@ -385,19 +389,21 @@ function render() {
       const untilClock = FMT_CLOCK.format(new Date(exp * 1000));
       statusCell.innerHTML = `<span class="status-active">active</span> <span class="countdown">${fmt(remaining)}</span> <span class="until">(until ${untilClock})</span>`;
       actionsCell.innerHTML = `
-        <button class="btn-primary" ${atMax ? 'disabled title="at 8h cap"' : ''} data-action="extend" data-name="${name}">Extend +1h</button>
-        <button class="btn-danger" data-action="deactivate" data-name="${name}">Deactivate</button>
+        <div class="btn-group">
+          <button class="btn-primary" ${atMax ? 'disabled title="at 8h cap"' : ''} data-action="extend" data-name="${name}">Extend +1h</button>
+          <button class="btn-danger" data-action="deactivate" data-name="${name}">Deactivate</button>
+        </div>
       `;
     } else if (blockedForMe.has(name)) {
       statusCell.innerHTML = `<span class="status-inactive" style="color:#f38ba8">blocked by admin</span>`;
-      actionsCell.innerHTML = `<button class="btn-primary" disabled title="An administrator has blocked this service for you">Activate</button>`;
+      actionsCell.innerHTML = `<div class="btn-group"><button class="btn-primary" disabled title="An administrator has blocked this service for you">Activate</button></div>`;
     } else if (tr.dataset.requiresApproval === 'true' && !approvedForMe.has(name)) {
       statusCell.innerHTML = `<span class="status-inactive" style="color:#f9e2af">awaiting admin approval</span>`;
-      actionsCell.innerHTML = `<button class="btn-primary" disabled title="This service requires explicit approval from an administrator before you can use it">Activate</button>`;
+      actionsCell.innerHTML = `<div class="btn-group"><button class="btn-primary" disabled title="This service requires explicit approval from an administrator before you can use it">Activate</button></div>`;
     } else {
       statusCell.innerHTML = `<span class="status-inactive">inactive</span>`;
       const label = hasConfig ? 'Activate' : 'Generate config first';
-      actionsCell.innerHTML = `<button class="btn-primary" ${hasConfig ? '' : 'disabled'} data-action="activate" data-name="${name}">${label}</button>`;
+      actionsCell.innerHTML = `<div class="btn-group"><button class="btn-primary" ${hasConfig ? '' : 'disabled'} data-action="activate" data-name="${name}">${label}</button></div>`;
     }
   });
 }
@@ -505,7 +511,7 @@ function renderUsers() {
     const deleteBtn = `<button class="btn-danger" data-delete="${uname}" title="Fully forget this user: IP, approvals, blocks, and all history are erased.">Delete</button>`;
     const actions = isSelf
       ? '<span style="color:#6c7086;font-size:0.85rem">you</span>'
-      : `${lockBtn} ${revokeBtn} ${deleteBtn}`;
+      : `<div class="btn-group">${lockBtn} ${revokeBtn} ${deleteBtn}</div>`;
 
     const ipCell = u.has_config
       ? `<span class="ip">${escapeHtml(u.wg_ip || '—')}</span>`
