@@ -21,6 +21,14 @@ services:
       - "51820:51820/udp"      # WireGuard — must be reachable from users
     expose:
       - "8080"                 # web UI — only to caddy, not the internet
+    # Read-only root filesystem: a Python RCE cannot modify the app code
+    # on disk, plant backdoors, or persist anything across restarts.
+    # Bind-mounted volumes below stay writable as intended.
+    read_only: true
+    tmpfs:
+      # gunicorn's worker-tmp + any tempfile.mkstemp() call without a dir=
+      # override goes to /tmp. Keep it small, non-exec, and auto-cleared.
+      - /tmp:size=64m,mode=1777
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./logs:/app/logs
@@ -40,6 +48,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
