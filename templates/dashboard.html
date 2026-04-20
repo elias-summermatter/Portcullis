@@ -617,6 +617,11 @@ function fmtAuditDetail(e) {
   if (e.expires_at) {
     parts.push(`until ${FMT_TIME.format(new Date(e.expires_at * 1000))}`);
   }
+  if (e.reason) parts.push(`reason: ${e.reason}`);
+  if (e.via) parts.push(`via: ${e.via}`);
+  if (e.target_user) parts.push(`target: ${e.target_user}`);
+  if (e.wg_ip) parts.push(`wg: ${e.wg_ip}`);
+  if (e.admin_via_team) parts.push('admin-via-team');
   if (e.error) parts.push(`error: ${e.error}`);
   return parts.join(' · ');
 }
