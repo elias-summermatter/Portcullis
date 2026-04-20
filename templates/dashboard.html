@@ -436,13 +436,21 @@ function renderUsers() {
     const lockBtn = fullyLocked
       ? `<button class="btn-secondary" data-unlock="${uname}" title="Allow access again">Unlock</button>`
       : `<button class="btn-danger" data-lock="${uname}" title="Block every service for this user in one click">Lock out</button>`;
+    const revokeBtn = u.has_config
+      ? `<button class="btn-danger" data-revoke="${uname}" title="Invalidate the current WG config. IP + approvals + blocks survive for when the user re-downloads.">Revoke config</button>`
+      : '';
+    const deleteBtn = `<button class="btn-danger" data-delete="${uname}" title="Fully forget this user: IP, approvals, blocks, and all history are erased.">Delete</button>`;
     const actions = isSelf
       ? '<span style="color:#6c7086;font-size:0.85rem">you</span>'
-      : `${lockBtn} <button class="btn-danger" data-revoke="${uname}">Revoke config</button>`;
+      : `${lockBtn} ${revokeBtn} ${deleteBtn}`;
+
+    const ipCell = u.has_config
+      ? `<span class="ip">${escapeHtml(u.wg_ip || '—')}</span>`
+      : `<span class="ip">${escapeHtml(u.wg_ip || '—')}</span> <span class="no-entry" title="No current WG config. Admin policy (blocks / approvals) is preserved; user can re-download to reinstate access.">no config</span>`;
 
     return `<tr class="${isSelf ? 'self-row' : ''}">
       <td><strong>${uname}</strong></td>
-      <td class="ip">${escapeHtml(u.wg_ip || '—')}</td>
+      <td>${ipCell}</td>
       <td>${activeCell}</td>
       <td>${approvedCell}</td>
       <td>${blockedCell}</td>
@@ -467,7 +475,17 @@ document.addEventListener('click', async (ev) => {
     revoke.disabled = true;
     try {
       await postAdmin(`/api/revoke/${encodeURIComponent(revoke.dataset.revoke)}`, {
-        confirmMsg: `Revoke ${revoke.dataset.revoke}'s WG config? Tunnel stops immediately and all grants are dropped.`,
+        confirmMsg: `Revoke ${revoke.dataset.revoke}'s WG config? Tunnel stops immediately and all grants are dropped. Approvals and blocks are preserved — if they re-download, those settings reapply.`,
+      });
+    } finally { refreshUsers(); refreshAudit(true); }
+    return;
+  }
+  const del = ev.target.closest('button[data-delete]');
+  if (del) {
+    del.disabled = true;
+    try {
+      await postAdmin(`/api/admin/delete/${encodeURIComponent(del.dataset.delete)}`, {
+        confirmMsg: `Permanently DELETE ${del.dataset.delete}? Their IP is released, all approvals and blocks are erased, and the audit trail for future actions loses the reserved slot. Use Revoke if this is just key rotation.`,
       });
     } finally { refreshUsers(); refreshAudit(true); }
     return;

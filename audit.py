@@ -17,7 +17,7 @@ CATEGORY = {
     "session_revoked": "auth",
     "activate": "grant", "extend": "grant", "deactivate": "grant",
     "grant_expired": "grant", "wg_config_generated": "grant",
-    "user_revoked": "admin", "admin_deactivate": "admin",
+    "user_revoked": "admin", "user_deleted": "admin", "admin_deactivate": "admin",
     "service_blocked": "admin", "service_unblocked": "admin",
     "service_approved": "admin", "service_approval_revoked": "admin",
     "user_locked": "admin", "user_unlocked": "admin",

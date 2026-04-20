@@ -492,6 +492,19 @@ def create_app(config: dict) -> Flask:
                      target_user=username)
         return jsonify({"ok": True, "revoked": username})
 
+    @app.route("/api/admin/delete/<username>", methods=["POST"])
+    @admin_required
+    def api_admin_delete(username: str):
+        actor = session["user"]
+        if username == actor:
+            return jsonify({"error": "cannot delete yourself"}), 400
+        ok = gateway.delete_user(username)
+        if not ok:
+            return jsonify({"error": "unknown user"}), 404
+        audit.record("user_deleted", user=actor, ip=request.remote_addr,
+                     target_user=username)
+        return jsonify({"ok": True, "deleted": username})
+
     @app.route("/api/admin/deactivate/<username>/<name>", methods=["POST"])
     @admin_required
     def api_admin_deactivate(username: str, name: str):

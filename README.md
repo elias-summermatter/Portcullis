@@ -67,7 +67,11 @@ X25519 keypair, for post-quantum hedging.
   - Approve a per-user, off-by-default service (`requires_approval`)
     and revoke that approval again
   - One-click **Lock out** to block every service for a user at once
-  - Revoke a user's WG config entirely (peer removed, keys invalidated)
+  - **Revoke** a user's WG config (keys invalidated, grants dropped —
+    approvals, blocks, and IP stay, so a re-download reinstates the
+    same identity with the same policy)
+  - **Delete** a user entirely when they leave (IP released, all admin
+    policy erased)
 - Audit log in JSON Lines, with filter + pagination in the UI; rotated
   weekly and gzipped, archives kept for compliance
 - Config-download confirmation dialog requires acknowledging a "do not
@@ -250,6 +254,28 @@ service's IP lands in their `AllowedIPs`. The dashboard shows a
 *Rotate & download config* button for this (rotating their key, so
 previous configs are invalidated instantly).
 
+### Revoke vs Delete a user
+
+Two distinct admin actions handle different scenarios:
+
+- **Revoke config** — kills the user's WireGuard keys and drops any
+  active grants, but **keeps the user record**: their allocated WG IP,
+  all approvals, and all blocks survive. When the user later clicks
+  *Generate & download config* again, they get the same IP and admin
+  policy automatically reapplies. Use for: lost device, key rotation,
+  suspected key leak.
+- **Delete** — fully forgets the user: IP is released back to the
+  pool, approvals and blocks are erased, and the entry disappears from
+  the Users table. Use for: the person left the company / should have
+  no future access.
+
+Before this split existed, Revoke silently wiped admin policy too, so
+a block set weeks ago could quietly disappear during a key rotation.
+That's fixed; admin decisions now persist until you explicitly choose
+to erase them with Delete.
+
+Both actions are audited (`user_revoked`, `user_deleted`).
+
 ### Approve a user for a gated service
 
 Services marked `requires_approval: true` in `config.yaml` are off by
@@ -377,7 +403,7 @@ Admins see two extra sections on the dashboard:
 | Approved services | Mauve chip per approved `requires_approval` service + `x` to revoke approval. Dropdown lets you approve. |
 | Blocked services  | Red chip per blocked service + `x` to unblock. Dropdown below lets you block. |
 | Registered        | When they first downloaded a config.                                          |
-| Actions           | **Lock out** (block all services; red), **Revoke config** (drop the peer).    |
+| Actions           | **Lock out** (block all services), **Revoke config** (drop keys, keep policy), **Delete** (forget entirely). |
 
 **Audit log** — chronologically ordered, server-side filterable by
 event category, service, user, and IP; paginated; reads both the live
@@ -388,7 +414,8 @@ Admin endpoints:
 
 | Route                                    | Purpose                             |
 |------------------------------------------|-------------------------------------|
-| `POST /api/revoke/<user>`                | Remove peer + invalidate config     |
+| `POST /api/revoke/<user>`                | Drop peer + invalidate keys. IP + approvals + blocks survive. |
+| `POST /api/admin/delete/<user>`          | Fully forget a user: release IP, erase all policy.            |
 | `POST /api/admin/deactivate/<u>/<svc>`   | Kick a single active grant         |
 | `POST /api/admin/block/<u>/<svc>`        | Permanently block a service        |
 | `POST /api/admin/unblock/<u>/<svc>`      | Undo a block                        |
@@ -414,7 +441,8 @@ Events you'll see: `login`, `login_failed`, `logout`, `session_revoked`,
 `session_expired`, `wg_config_generated`, `activate`, `extend`,
 `deactivate`, `grant_expired`, `user_revoked`, `admin_deactivate`,
 `service_blocked`, `service_unblocked`, `service_approved`,
-`service_approval_revoked`, `user_locked`, `user_unlocked`.
+`service_approval_revoked`, `user_locked`, `user_unlocked`,
+`user_deleted`.
 
 Rotation: every Monday 00:00 UTC (configurable) the live file is renamed
 to `audit-YYYY-MM-DD.log.gz`, gzipped, and a new live file starts.

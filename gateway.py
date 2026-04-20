@@ -157,6 +157,8 @@ class Gateway:
             self._setup_interface()
             self._setup_base_firewall()
             for username, u in self.users.items():
+                if not u.get("public_key"):
+                    continue  # revoked user with policy preserved — no peer
                 try:
                     self._wg_add_peer(u["public_key"], u["ip"],
                                       preshared_key_b64=u.get("preshared_key"))
@@ -262,25 +264,29 @@ class Gateway:
     def register_user(self, username: str) -> tuple[str, str]:
         """Generate a keypair, register a peer, persist, return (config_text, ip).
 
+        Only key material (public_key, preshared_key) is replaced on each
+        call. Existing IP allocation, created_at timestamp, and admin
+        policy (blocked_services, approved_services) survive — so a
+        revoke-then-redownload flow, or a key rotation, does NOT silently
+        wipe out prior admin decisions about this user.
+
         The private key is returned once and not stored by the gateway."""
         with self._lock:
-            if username in self.users:
-                old = self.users[username]
+            existing = self.users.get(username)
+            old_public = existing.get("public_key") if existing else None
+            if old_public:
                 try:
-                    self._wg_remove_peer(old["public_key"])
+                    self._wg_remove_peer(old_public)
                 except Exception:
                     pass
-                ip = old["ip"]
-            else:
-                ip = self._allocate_ip()
+            ip = existing["ip"] if existing else self._allocate_ip()
             kp = generate_keypair()
             psk = generate_preshared_key()
-            self.users[username] = {
-                "public_key": kp.public_key_b64,
-                "preshared_key": psk,
-                "ip": ip,
-                "created_at": time.time(),
-            }
+            record = existing or {"created_at": time.time()}
+            record["public_key"] = kp.public_key_b64
+            record["preshared_key"] = psk
+            record["ip"] = ip
+            self.users[username] = record
             self._save_users()
             self._wg_add_peer(kp.public_key_b64, ip, preshared_key_b64=psk)
 
@@ -304,7 +310,8 @@ class Gateway:
         return u["ip"] if u else None
 
     def user_has_config(self, username: str) -> bool:
-        return username in self.users
+        u = self.users.get(username)
+        return bool(u and u.get("public_key"))
 
     def list_users(self) -> list[dict]:
         now = time.time()
@@ -320,6 +327,7 @@ class Gateway:
                     "username": username,
                     "wg_ip": u.get("ip"),
                     "created_at": u.get("created_at"),
+                    "has_config": bool(u.get("public_key")),
                     "active": active,
                     "blocked": list(u.get("blocked_services", [])),
                     "approved": list(u.get("approved_services", [])),
@@ -430,11 +438,19 @@ class Gateway:
         return True
 
     def revoke_user(self, username: str) -> bool:
-        """Kill all grants + drop the WG peer + forget the user's assignment.
-        Returns True if the user had a config; False otherwise."""
+        """Kill all grants + drop the WG peer, keep the user record.
+
+        The user's IP allocation and admin policy (blocked_services,
+        approved_services, created_at) are PRESERVED so that a later
+        /wg-config re-download reinstates the same identity with the same
+        policy. This is the "lost device / key rotation" flow.
+
+        Use delete_user for true forgetting.
+
+        Returns True if the user had an active config; False otherwise."""
         with self._lock:
-            u = self.users.pop(username, None)
-            if u is None:
+            u = self.users.get(username)
+            if u is None or not u.get("public_key"):
                 return False
             for key in [k for k in self.grants if k[0] == username]:
                 g = self.grants.pop(key)
@@ -446,8 +462,36 @@ class Gateway:
                 self._wg_remove_peer(u["public_key"])
             except Exception as e:
                 log.warning("wg peer remove failed for %s: %s", username, e)
+            u["public_key"] = None
+            u["preshared_key"] = None
             self._save_users()
-        log.info("revoked user=%s ip=%s", username, u.get("ip"))
+        log.info("revoked user=%s ip=%s (policy preserved)", username, u.get("ip"))
+        return True
+
+    def delete_user(self, username: str) -> bool:
+        """Fully forget a user: drop the peer, kill grants, release the IP
+        allocation, and erase all admin policy. Use this when the user
+        will not come back (e.g. left the company). For key rotation or a
+        lost device, use revoke_user instead.
+
+        Returns True if the user existed; False otherwise."""
+        with self._lock:
+            u = self.users.pop(username, None)
+            if u is None:
+                return False
+            for key in [k for k in self.grants if k[0] == username]:
+                g = self.grants.pop(key)
+                self._apply_rules(g.rules, delete=True)
+                svc = self.services.get(key[1])
+                if svc is not None:
+                    self._drop_conntrack(g.user_ip, svc)
+            if u.get("public_key"):
+                try:
+                    self._wg_remove_peer(u["public_key"])
+                except Exception as e:
+                    log.warning("wg peer remove failed for %s: %s", username, e)
+            self._save_users()
+        log.info("deleted user=%s ip=%s (all policy erased)", username, u.get("ip"))
         return True
 
     # --- service resolution ----------------------------------------------
