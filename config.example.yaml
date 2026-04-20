@@ -112,9 +112,13 @@ admins: []
 # iptables FORWARD rule.
 #
 # Optional fields:
-#   cidrs:     [ "1.2.3.0/24" ]   pin explicit IPs (skip DNS for these)
-#   port:      443                 restrict to one port; omit for any
-#   protocol:  "tcp"               defaults to tcp
+#   cidrs:             [ "1.2.3.0/24" ]   pin explicit IPs (skip DNS for these)
+#   port:              443                 restrict to one port; omit for any
+#   protocol:          "tcp"               defaults to tcp
+#   requires_approval: true                off-by-default; an admin must call
+#                                          "Approve" per user before they can
+#                                          activate it. Block still overrides
+#                                          approval.
 
 services:
   - name: example-ssh
@@ -128,3 +132,4 @@ services:
   - name: example-db
     hostname: "db.internal.example.com"
     port: 5432
+    requires_approval: true

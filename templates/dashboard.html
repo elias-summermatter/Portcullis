@@ -63,6 +63,7 @@
     .chip { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.5rem; border-radius: 12px; font-size: 0.8rem; margin: 0.15rem 0.2rem 0.15rem 0; font-family: ui-monospace, monospace; }
     .chip-active { background: rgba(166, 227, 161, 0.15); color: #a6e3a1; }
     .chip-blocked { background: rgba(243, 139, 168, 0.15); color: #f38ba8; }
+    .chip-approved { background: rgba(203, 166, 247, 0.15); color: #cba6f7; }
     .chip button { background: transparent; color: inherit; border: 0; padding: 0 0.2rem; margin: 0; font-size: 0.9rem; line-height: 1; cursor: pointer; opacity: 0.7; }
     .chip button:hover { opacity: 1; }
     .block-picker { background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a; border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.8rem; margin-top: 0.15rem; }
@@ -165,7 +166,7 @@
     </thead>
     <tbody id="rows">
       {% for svc in services %}
-      <tr data-name="{{ svc.name }}">
+      <tr data-name="{{ svc.name }}" data-requires-approval="{{ 'true' if svc.requires_approval else 'false' }}">
         <td><strong>{{ svc.name }}</strong></td>
         <td class="target">
           {% if svc.hostname %}{{ svc.hostname }}{% endif %}
@@ -194,13 +195,14 @@
         <th>Username</th>
         <th>WG IP</th>
         <th>Active grants</th>
+        <th>Approved services</th>
         <th>Blocked services</th>
         <th>Registered</th>
         <th style="text-align:right">Actions</th>
       </tr>
     </thead>
     <tbody id="users-rows">
-      <tr><td colspan="6" style="color:#6c7086;text-align:center;padding:1rem">loading…</td></tr>
+      <tr><td colspan="7" style="color:#6c7086;text-align:center;padding:1rem">loading…</td></tr>
     </tbody>
   </table>
 
@@ -251,6 +253,7 @@
 const MAX_SECONDS = 8 * 3600;
 let grants = {};
 let blockedForMe = new Set();
+let approvedForMe = new Set();
 let hasConfig = document.body.dataset.hasConfig === 'true';
 const isAdmin = document.body.dataset.isAdmin === 'true';
 const currentUser = {{ user | tojson }};
@@ -302,6 +305,7 @@ async function refresh() {
     grants = data.grants || {};
     hasConfig = !!data.has_config;
     blockedForMe = new Set(data.blocked || []);
+    approvedForMe = new Set(data.approved || []);
   } catch (e) { /* network hiccup, keep last state */ }
   render();
 }
@@ -324,6 +328,9 @@ function render() {
     } else if (blockedForMe.has(name)) {
       statusCell.innerHTML = `<span class="status-inactive" style="color:#f38ba8">blocked by admin</span>`;
       actionsCell.innerHTML = `<button class="btn-primary" disabled title="An administrator has blocked this service for you">Activate</button>`;
+    } else if (tr.dataset.requiresApproval === 'true' && !approvedForMe.has(name)) {
+      statusCell.innerHTML = `<span class="status-inactive" style="color:#f9e2af">awaiting admin approval</span>`;
+      actionsCell.innerHTML = `<button class="btn-primary" disabled title="This service requires explicit approval from an administrator before you can use it">Activate</button>`;
     } else {
       statusCell.innerHTML = `<span class="status-inactive">inactive</span>`;
       const label = hasConfig ? 'Activate' : 'Generate config first';
@@ -351,6 +358,7 @@ document.getElementById('rows').addEventListener('click', async (ev) => {
 
 let usersList = [];
 const ALL_SERVICES = [{% for svc in services %}{{ svc.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
+const APPROVAL_REQUIRED = new Set({{ services | selectattr('requires_approval') | map(attribute='name') | list | tojson }});
 
 async function refreshUsers() {
   if (!isAdmin) return;
@@ -368,7 +376,7 @@ function renderUsers() {
   const tbody = document.getElementById('users-rows');
   if (!tbody) return;
   if (!usersList.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="color:#6c7086;text-align:center;padding:1rem">no users have a WG config yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="color:#6c7086;text-align:center;padding:1rem">no users have a WG config yet</td></tr>';
     return;
   }
   const now = Date.now() / 1000;
@@ -400,6 +408,29 @@ function renderUsers() {
       : '';
     const blockedCell = `${blockedChips || '<span class="no-entry">none</span>'}<div>${picker}</div>`;
 
+    // Approvals: only meaningful for services configured requires_approval.
+    // Stale approvals on non-gated services are hidden so the UI doesn't show
+    // chips the admin can never remove meaningfully.
+    const approvedSet = new Set(u.approved || []);
+    let approvedCell;
+    if (APPROVAL_REQUIRED.size === 0) {
+      approvedCell = '<span class="no-entry">no gated services</span>';
+    } else {
+      const approvedChips = [...approvedSet]
+        .filter(svc => APPROVAL_REQUIRED.has(svc))
+        .map(svc => `<span class="chip chip-approved">${escapeHtml(svc)}`
+          + `<button title="Revoke approval" data-revoke-approval="${uname}" data-service="${escapeHtml(svc)}">×</button></span>`)
+        .join('');
+      const approvable = [...APPROVAL_REQUIRED].filter(s => !approvedSet.has(s));
+      const approvalPicker = approvable.length
+        ? `<select class="approval-picker" data-user="${uname}">
+             <option value="">+ approve service…</option>
+             ${approvable.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')}
+           </select>`
+        : '';
+      approvedCell = `${approvedChips || '<span class="no-entry">none</span>'}<div>${approvalPicker}</div>`;
+    }
+
     const created = u.created_at ? new Date(u.created_at * 1000).toLocaleString() : '—';
     const fullyLocked = ALL_SERVICES.length > 0 && ALL_SERVICES.every(s => blockedSet.has(s));
     const lockBtn = fullyLocked
@@ -413,6 +444,7 @@ function renderUsers() {
       <td><strong>${uname}</strong></td>
       <td class="ip">${escapeHtml(u.wg_ip || '—')}</td>
       <td>${activeCell}</td>
+      <td>${approvedCell}</td>
       <td>${blockedCell}</td>
       <td style="color:#a6adc8;font-size:0.85rem">${escapeHtml(created)}</td>
       <td style="text-align:right">${actions}</td>
@@ -456,6 +488,16 @@ document.addEventListener('click', async (ev) => {
     } finally { refreshUsers(); refreshAudit(true); }
     return;
   }
+  const revokeApproval = ev.target.closest('button[data-revoke-approval]');
+  if (revokeApproval) {
+    revokeApproval.disabled = true;
+    try {
+      await postAdmin(`/api/admin/revoke-approval/${encodeURIComponent(revokeApproval.dataset.revokeApproval)}/${encodeURIComponent(revokeApproval.dataset.service)}`, {
+        confirmMsg: `Revoke approval for ${revokeApproval.dataset.service} from ${revokeApproval.dataset.revokeApproval}? Any active grant for this service is dropped.`,
+      });
+    } finally { refreshUsers(); refreshAudit(true); }
+    return;
+  }
   const lock = ev.target.closest('button[data-lock]');
   if (lock) {
     lock.disabled = true;
@@ -488,16 +530,28 @@ function tickUsersCountdowns() {
 }
 
 document.addEventListener('change', async (ev) => {
-  const picker = ev.target.closest('select.block-picker');
-  if (!picker || !picker.value) return;
-  const user = picker.dataset.user;
-  const svc = picker.value;
-  picker.value = '';
-  await postAdmin(`/api/admin/block/${encodeURIComponent(user)}/${encodeURIComponent(svc)}`, {
-    confirmMsg: `Permanently block ${svc} for ${user}? Any active grant for this service will also be revoked.`,
-  });
-  refreshUsers();
-  refreshAudit(true);
+  const blockPicker = ev.target.closest('select.block-picker');
+  if (blockPicker && blockPicker.value) {
+    const user = blockPicker.dataset.user;
+    const svc = blockPicker.value;
+    blockPicker.value = '';
+    await postAdmin(`/api/admin/block/${encodeURIComponent(user)}/${encodeURIComponent(svc)}`, {
+      confirmMsg: `Permanently block ${svc} for ${user}? Any active grant for this service will also be revoked.`,
+    });
+    refreshUsers();
+    refreshAudit(true);
+    return;
+  }
+  const approvalPicker = ev.target.closest('select.approval-picker');
+  if (approvalPicker && approvalPicker.value) {
+    const user = approvalPicker.dataset.user;
+    const svc = approvalPicker.value;
+    approvalPicker.value = '';
+    await postAdmin(`/api/admin/approve/${encodeURIComponent(user)}/${encodeURIComponent(svc)}`);
+    refreshUsers();
+    refreshAudit(true);
+    return;
+  }
 });
 
 // --- audit panel --------------------------------------------------------

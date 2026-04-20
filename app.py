@@ -405,6 +405,7 @@ def create_app(config: dict) -> Flask:
             "has_config": gateway.user_has_config(u),
             "grants": gateway.status_for_user(u),
             "blocked": list(user_state.get("blocked_services", [])),
+            "approved": list(user_state.get("approved_services", [])),
         })
 
     @app.route("/wg-config", methods=["POST"])
@@ -525,6 +526,30 @@ def create_app(config: dict) -> Flask:
         if not ok:
             return jsonify({"error": "unknown user"}), 404
         audit.record("service_unblocked", user=actor, ip=request.remote_addr,
+                     target_user=username, service=name)
+        return jsonify({"ok": True})
+
+    @app.route("/api/admin/approve/<username>/<name>", methods=["POST"])
+    @admin_required
+    def api_admin_approve(username: str, name: str):
+        actor = session["user"]
+        if name not in gateway.services:
+            return jsonify({"error": "unknown service"}), 404
+        ok = gateway.approve_service(username, name)
+        if not ok:
+            return jsonify({"error": "unknown user"}), 404
+        audit.record("service_approved", user=actor, ip=request.remote_addr,
+                     target_user=username, service=name)
+        return jsonify({"ok": True})
+
+    @app.route("/api/admin/revoke-approval/<username>/<name>", methods=["POST"])
+    @admin_required
+    def api_admin_revoke_approval(username: str, name: str):
+        actor = session["user"]
+        ok = gateway.revoke_approval(username, name)
+        if not ok:
+            return jsonify({"error": "unknown user"}), 404
+        audit.record("service_approval_revoked", user=actor, ip=request.remote_addr,
                      target_user=username, service=name)
         return jsonify({"ok": True})
 

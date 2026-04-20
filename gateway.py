@@ -64,6 +64,10 @@ class Service:
     port: Optional[int] = None
     protocol: str = "tcp"
     resolved: list[str] = field(default_factory=list)  # list of /32 or CIDRs
+    # If True the service is off-by-default: a user cannot activate it until
+    # an admin has explicitly called approve_service for them. Block still
+    # takes precedence over approval.
+    requires_approval: bool = False
 
 
 @dataclass
@@ -98,6 +102,7 @@ class Gateway:
                 cidrs=list(s.get("cidrs", [])),
                 port=s.get("port"),
                 protocol=s.get("protocol", "tcp"),
+                requires_approval=bool(s.get("requires_approval", False)),
             )
             self.services[svc.name] = svc
 
@@ -317,6 +322,7 @@ class Gateway:
                     "created_at": u.get("created_at"),
                     "active": active,
                     "blocked": list(u.get("blocked_services", [])),
+                    "approved": list(u.get("approved_services", [])),
                 })
             return out
 
@@ -325,6 +331,12 @@ class Gateway:
         if not u:
             return False
         return service_name in u.get("blocked_services", [])
+
+    def is_approved(self, username: str, service_name: str) -> bool:
+        u = self.users.get(username)
+        if not u:
+            return False
+        return service_name in u.get("approved_services", [])
 
     def block_service(self, username: str, service_name: str) -> bool:
         """Permanently block a service for a user + revoke any active grant.
@@ -354,6 +366,40 @@ class Gateway:
             blocked.discard(service_name)
             u["blocked_services"] = sorted(blocked)
             self._save_users()
+        return True
+
+    def approve_service(self, username: str, service_name: str) -> bool:
+        """Grant an approval-gated service to a user. Does nothing if the
+        service is not marked requires_approval (no effect, returns True so
+        the admin UI stays idempotent). Returns False only if the user is
+        unknown."""
+        with self._lock:
+            u = self.users.get(username)
+            if not u:
+                return False
+            approved = set(u.get("approved_services", []))
+            approved.add(service_name)
+            u["approved_services"] = sorted(approved)
+            self._save_users()
+        return True
+
+    def revoke_approval(self, username: str, service_name: str) -> bool:
+        """Remove a previously-granted approval AND tear down any active grant
+        for that service. Returns False only if the user is unknown."""
+        with self._lock:
+            u = self.users.get(username)
+            if not u:
+                return False
+            approved = set(u.get("approved_services", []))
+            approved.discard(service_name)
+            u["approved_services"] = sorted(approved)
+            self._save_users()
+            g = self.grants.pop((username, service_name), None)
+            if g is not None:
+                self._apply_rules(g.rules, delete=True)
+                svc = self.services.get(service_name)
+                if svc is not None:
+                    self._drop_conntrack(g.user_ip, svc)
         return True
 
     def lock_user(self, username: str) -> bool:
@@ -491,6 +537,8 @@ class Gateway:
             raise RuntimeError("user has no WG config; generate one first")
         if service_name in u.get("blocked_services", []):
             raise PermissionError(f"service {service_name!r} is blocked for this user")
+        if svc.requires_approval and service_name not in u.get("approved_services", []):
+            raise PermissionError(f"service {service_name!r} requires admin approval")
         user_ip = u["ip"]
         now = time.time()
         expires = now + DEFAULT_DURATION
@@ -517,6 +565,8 @@ class Gateway:
         svc = self.services.get(service_name)
         if svc is None:
             raise KeyError(service_name)
+        if svc.requires_approval and service_name not in u.get("approved_services", []):
+            raise PermissionError(f"service {service_name!r} requires admin approval")
         now = time.time()
         key = (user, service_name)
         with self._lock:

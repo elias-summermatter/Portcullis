@@ -60,10 +60,12 @@ X25519 keypair, for post-quantum hedging.
 - OAuth membership is re-checked on an interval so removing a user from
   the team kicks their session out
 - Admin dashboard:
-  - See every user's WG IP, active grants with live countdowns, and
-    blocked services
+  - See every user's WG IP, active grants with live countdowns, per-user
+    approvals, and blocked services
   - Revoke individual grants (kick)
   - Permanently block a service for a user
+  - Approve a per-user, off-by-default service (`requires_approval`)
+    and revoke that approval again
   - One-click **Lock out** to block every service for a user at once
   - Revoke a user's WG config entirely (peer removed, keys invalidated)
 - Audit log in JSON Lines, with filter + pagination in the UI; rotated
@@ -166,6 +168,7 @@ documented inline. Highlights:
 | `services[].hostname`         | Service hostname — resolved at startup + every 5 min.              |
 | `services[].port`             | Optional port restriction. Omit for any TCP port.                  |
 | `services[].cidrs`            | Optional explicit IP/CIDR list, merged with DNS results.           |
+| `services[].requires_approval`| If `true`, users cannot activate the service until an admin approves them for it. Block still overrides. |
 
 ### GitHub OAuth setup
 
@@ -246,6 +249,25 @@ The hostname is resolved at startup and every 5 minutes thereafter.
 service's IP lands in their `AllowedIPs`. The dashboard shows a
 *Rotate & download config* button for this (rotating their key, so
 previous configs are invalidated instantly).
+
+### Approve a user for a gated service
+
+Services marked `requires_approval: true` in `config.yaml` are off by
+default — users see them on the dashboard as *awaiting admin approval*
+and cannot click **Activate**. To let a specific user in:
+
+1. Open the admin dashboard → **Users** table.
+2. In the *Approved services* cell for that user, pick the service from
+   the *+ approve service…* dropdown.
+3. The user can now activate it normally.
+
+To take access away, click the `×` on the mauve approval chip — any
+active grant for that service is torn down immediately, and the user
+goes back to *awaiting approval*.
+
+Blocks still override approvals: a blocked-and-approved user is
+blocked. Use this for services that should never have blanket access
+(prod databases, on-call-only admin consoles, etc.).
 
 ### Remove a service
 
@@ -352,6 +374,7 @@ Admins see two extra sections on the dashboard:
 | Username          | The username / GitHub login.                                                  |
 | WG IP             | Their assigned private IP on the WG network.                                  |
 | Active grants     | Green chip per active service with live countdown + `x` to kick.              |
+| Approved services | Mauve chip per approved `requires_approval` service + `x` to revoke approval. Dropdown lets you approve. |
 | Blocked services  | Red chip per blocked service + `x` to unblock. Dropdown below lets you block. |
 | Registered        | When they first downloaded a config.                                          |
 | Actions           | **Lock out** (block all services; red), **Revoke config** (drop the peer).    |
@@ -369,6 +392,8 @@ Admin endpoints:
 | `POST /api/admin/deactivate/<u>/<svc>`   | Kick a single active grant         |
 | `POST /api/admin/block/<u>/<svc>`        | Permanently block a service        |
 | `POST /api/admin/unblock/<u>/<svc>`      | Undo a block                        |
+| `POST /api/admin/approve/<u>/<svc>`      | Approve a user for a `requires_approval` service |
+| `POST /api/admin/revoke-approval/<u>/<svc>` | Revoke that approval + drop any active grant |
 | `POST /api/admin/lock/<u>`               | Block every service in one click    |
 | `POST /api/admin/unlock/<u>`             | Clear all blocks                    |
 | `GET /api/audit?...`                     | Filter + paginate the audit log    |
@@ -386,9 +411,10 @@ JSON Lines at `logs/audit.log`, one event per line:
 ```
 
 Events you'll see: `login`, `login_failed`, `logout`, `session_revoked`,
-`wg_config_generated`, `activate`, `extend`, `deactivate`,
-`grant_expired`, `user_revoked`, `admin_deactivate`, `service_blocked`,
-`service_unblocked`, `user_locked`, `user_unlocked`.
+`session_expired`, `wg_config_generated`, `activate`, `extend`,
+`deactivate`, `grant_expired`, `user_revoked`, `admin_deactivate`,
+`service_blocked`, `service_unblocked`, `service_approved`,
+`service_approval_revoked`, `user_locked`, `user_unlocked`.
 
 Rotation: every Monday 00:00 UTC (configurable) the live file is renamed
 to `audit-YYYY-MM-DD.log.gz`, gzipped, and a new live file starts.
