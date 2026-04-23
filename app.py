@@ -265,8 +265,8 @@ def create_app(config: dict) -> Flask:
         if origin == expected:
             return
         # Fallback: some very old browsers omit Origin on same-origin
-        # POSTs. Our own Referrer-Policy: no-referrer will usually strip
-        # the Referer, but checking it doesn't hurt.
+        # POSTs. Referrer-Policy: same-origin keeps the Referer on
+        # same-origin requests, so this check is viable.
         referer = request.headers.get("Referer")
         if referer and referer.startswith(expected + "/"):
             return
@@ -320,7 +320,12 @@ def create_app(config: dict) -> Flask:
     def _security_headers(resp):
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("X-Frame-Options", "DENY")
-        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        # same-origin keeps the Origin header on same-origin POSTs (CSRF
+        # check depends on it) and sends nothing cross-origin — external
+        # sites never see our hostname. "no-referrer" would be stricter
+        # but also breaks the CSRF check: browsers serialize Origin as
+        # "null" under it, even for same-origin requests.
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
         # Permissions-Policy — deny every powerful feature by default.
         # Expanded list of interfaces a compromised page could otherwise
         # request from users (sensors, hardware, payments, autoplay, etc.).

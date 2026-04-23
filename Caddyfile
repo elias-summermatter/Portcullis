@@ -14,7 +14,7 @@ gateway.example.com {
         -X-Powered-By
         -Via
         X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex"
-        Referrer-Policy no-referrer
+        Referrer-Policy same-origin
     }
     reverse_proxy gateway:8080 {
         # Don't announce the Caddy hop on requests forwarded upstream, and

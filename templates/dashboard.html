@@ -931,6 +931,8 @@ function fmtAuditDetail(e) {
   if (e.bytes_in != null) parts.push(`bytes: ${e.bytes_in}`);
   if (e.wg_ip) parts.push(`wg: ${e.wg_ip}`);
   if (e.admin_via_team) parts.push('admin-via-team');
+  if (e.path) parts.push(`path: ${e.path}`);
+  if (e.origin) parts.push(`origin: ${e.origin}`);
   if (e.error) parts.push(`error: ${e.error}`);
   return parts.join(' · ');
 }
