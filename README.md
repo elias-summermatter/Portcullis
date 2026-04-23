@@ -483,25 +483,6 @@ git pull
 docker compose up -d --build
 ```
 
-### Regenerate the dependency lockfile
-
-`requirements.in` lists direct Python dependencies; `requirements.txt`
-is a generated lockfile with pinned versions + SHA-256 hashes for every
-package (direct and transitive). The Dockerfile installs with
-`pip install --require-hashes`, so PyPI cannot silently swap a
-malicious build into your image between rebuilds.
-
-Regenerate after editing `requirements.in`, or periodically to pick up
-CVE-patched versions:
-
-```bash
-./scripts/lock-deps.sh
-git add requirements.txt
-git commit -m "deps: refresh lockfile"
-```
-
-The script runs `pip-compile --generate-hashes` inside a disposable
-Docker container, so you don't need pip-tools installed locally.
 
 State (`state/`, `logs/`) survives because both directories are
 bind-mounted from the host. WireGuard peers and user assignments are
@@ -724,10 +705,6 @@ userspace proxy would break the chain of trust.
 
 **Supply chain & ops:**
 
-- **SHA-256-hash-pinned Python dependencies.** `requirements.txt` is
-  a generated lockfile; Dockerfile installs with `--require-hashes`.
-  Compromised PyPI accounts cannot ship a malicious build into your
-  image between rebuilds without the hash breaking.
 - **Dependabot** (`.github/dependabot.yml`) opens PRs when any
   pip/docker/github-actions dependency has a new version, with
   security updates filed immediately regardless of schedule.

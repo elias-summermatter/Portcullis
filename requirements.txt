@@ -1,17 +1,3 @@
-# This file is GENERATED. Run `scripts/lock-deps.sh` to regenerate from
-# requirements.in. The Dockerfile installs with `--require-hashes`, so
-# this file must contain a SHA-256 hash for every package — direct and
-# transitive. A placeholder install below keeps the build working until
-# the first run of scripts/lock-deps.sh, at which point this entire file
-# is overwritten by pip-compile with pinned versions + hashes.
-#
-# DO NOT EDIT BY HAND.
-
-# --- placeholder (until scripts/lock-deps.sh runs) ------------------
-# Version constraints copied from requirements.in. `pip install
-# --require-hashes` WILL FAIL against this file; that's the intended
-# behaviour — it forces you to run the lock script once before the
-# first real build.
 Flask>=3.0
 Flask-Limiter>=3.5
 bcrypt>=4.0

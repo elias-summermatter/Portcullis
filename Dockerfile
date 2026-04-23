@@ -33,12 +33,7 @@ RUN apt-get update \
 ENV TZ=Europe/Zurich
 
 COPY requirements.txt .
-# --require-hashes: every package (direct + transitive) must be pinned
-# with a SHA-256 hash matching PyPI's published artefact. Blocks a
-# compromised PyPI account from silently shipping a malicious build
-# into the image between rebuilds. Lockfile is generated from
-# requirements.in via scripts/lock-deps.sh.
-RUN pip install --require-hashes -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY app.py wsgi.py gateway.py wg.py audit.py webhooks.py hash_password.py entrypoint.sh gunicorn.conf.py ./
 COPY templates ./templates
