@@ -63,22 +63,22 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Run Semgrep
-        # `semgrep ci` without a login returns non-zero on any finding
-        # at ERROR severity; WARNING/INFO do not block. Exactly what we
-        # want — catch real issues, ignore style noise.
-        #
-        # `--sarif-output` (separate flag, NOT `--sarif --output`) keeps
-        # the human-readable findings going to stdout so you can see
-        # what blocked the build in the CI log, while also writing the
-        # SARIF file for the Security tab.
+        # `semgrep scan --error` (not `semgrep ci`) — scan mode runs only
+        # the explicitly configured rulepacks and honors inline
+        # `# nosemgrep: rule-id` suppressions consistently. `ci` mode
+        # pulls additional registry rules some of which silently ignore
+        # inline suppressions, producing false positives in CI that
+        # don't reproduce locally. --error makes the step fail on any
+        # finding (same blocking behaviour as `ci`).
         run: |
-          semgrep ci \
+          semgrep scan \
             --config p/security-audit \
             --config p/python \
             --config p/flask \
             --config p/owasp-top-ten \
             --config p/secrets \
             --config p/dockerfile \
+            --error \
             --sarif-output=semgrep.sarif
       - name: Upload SARIF
         if: always() && hashFiles('semgrep.sarif') != ''
