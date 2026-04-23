@@ -86,6 +86,10 @@ services:
     restart: unless-stopped
     environment:
       TZ: Europe/Zurich
+      # Watchtower's bundled Go client defaults to Docker API v1.25,
+      # which hardened / recent Docker daemons (v24+) refuse. Pinning to
+      # 1.41 matches what the daemon advertises on Docker 20.10+.
+      DOCKER_API_VERSION: "1.41"
       WATCHTOWER_CLEANUP: "true"          # remove old images after updating
       WATCHTOWER_LABEL_ENABLE: "true"     # only watch labelled containers
       WATCHTOWER_INCLUDE_RESTARTING: "true"
