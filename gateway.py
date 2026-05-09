@@ -498,8 +498,37 @@ class Gateway:
         u = self.users.get(username)
         return bool(u and u.get("public_key"))
 
+    _HANDSHAKE_CACHE_TTL = 2.0
+
+    def wg_handshakes(self) -> dict[str, int]:
+        """Map peer public_key -> latest_handshake unix seconds (0 = never).
+        Cached briefly so admin polling doesn't fork `wg` per request."""
+        now = time.monotonic()
+        cached = getattr(self, "_handshake_cache", None)
+        if cached and (now - cached[0]) < self._HANDSHAKE_CACHE_TTL:
+            return cached[1]
+        try:
+            proc = _run(["wg", "show", self.iface, "dump"],
+                        capture=True, check=False)
+            out = proc.stdout or ""
+        except Exception:
+            out = ""
+        handshakes: dict[str, int] = {}
+        # First line is the interface itself; peer lines have 8 tab-separated
+        # fields, field 0 = public_key, field 4 = latest_handshake.
+        for line in out.splitlines()[1:]:
+            parts = line.split("\t")
+            if len(parts) >= 5:
+                try:
+                    handshakes[parts[0]] = int(parts[4])
+                except ValueError:
+                    pass
+        self._handshake_cache = (now, handshakes)
+        return handshakes
+
     def list_users(self) -> list[dict]:
         now = time.time()
+        handshakes = self.wg_handshakes()
         with self._lock:
             out = []
             for username, u in self.users.items():
@@ -508,6 +537,8 @@ class Gateway:
                     for (uname, svc_name), g in self.grants.items()
                     if uname == username and g.expires_at > now
                 ]
+                pubkey = u.get("public_key")
+                last_hs = handshakes.get(pubkey) if pubkey else None
                 out.append({
                     "username": username,
                     "wg_ip": u.get("ip"),
@@ -516,6 +547,7 @@ class Gateway:
                     "active": active,
                     "blocked": list(u.get("blocked_services", [])),
                     "approved": list(u.get("approved_services", [])),
+                    "last_handshake": last_hs if last_hs else None,
                 })
             return out
 

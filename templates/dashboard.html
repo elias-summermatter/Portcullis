@@ -74,6 +74,10 @@
     .chip-blocked { background: rgba(243, 139, 168, 0.15); color: #f38ba8; }
     .chip-approved { background: rgba(203, 166, 247, 0.15); color: #cba6f7; }
 
+    .status-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.5rem; vertical-align: middle; flex-shrink: 0; }
+    .status-dot-online { background: #a6e3a1; box-shadow: 0 0 0 2px rgba(166, 227, 161, 0.18); }
+    .status-dot-offline { background: #f38ba8; box-shadow: 0 0 0 2px rgba(243, 139, 168, 0.18); }
+
     .mesh-badge { display: inline-block; padding: 0.12rem 0.5rem; border-radius: 10px; font-size: 0.72rem; margin-left: 0.35rem; font-weight: 500; vertical-align: middle; font-family: ui-monospace, monospace; background: rgba(203, 166, 247, 0.15); color: #cba6f7; }
     .health-chip { display: inline-block; padding: 0.12rem 0.5rem; border-radius: 10px; font-size: 0.72rem; margin-left: 0.35rem; font-weight: 500; vertical-align: middle; font-family: ui-monospace, monospace; }
     .health-reachable { background: rgba(166, 227, 161, 0.15); color: #a6e3a1; }
@@ -419,6 +423,14 @@ function fmt(sec) {
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
 
+function fmtAgo(seconds) {
+  if (seconds < 0) return 'just now';
+  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
 // All timestamps are persisted in UTC. Display in the operator-configured
 // timezone (TZ env var on the container, see docker-compose.yml) so the
 // whole team sees a consistent clock regardless of where each viewer is.
@@ -675,6 +687,15 @@ function renderUsers() {
     const uname = escapeHtml(u.username);
     const isSelf = u.username === currentUser;
 
+    let dot = '';
+    if (u.has_config) {
+      const last = u.last_handshake;
+      const age = last ? (now - last) : null;
+      const online = age !== null && age < 180;
+      const tooltip = last ? `last handshake: ${fmtAgo(age)}` : 'never connected';
+      dot = `<span class="status-dot ${online ? 'status-dot-online' : 'status-dot-offline'}" title="${escapeHtml(tooltip)}"></span>`;
+    }
+
     const activeChips = (u.active || [])
       .filter(a => a.expires_at > now)
       .map(a => {
@@ -740,7 +761,7 @@ function renderUsers() {
       : `<span class="ip">${escapeHtml(u.wg_ip || '—')}</span> <span class="no-entry" title="No current WG config. Admin policy (blocks / approvals) is preserved; user can re-download to reinstate access.">no config</span>`;
 
     return `<tr class="${isSelf ? 'self-row' : ''}">
-      <td><strong>${uname}</strong></td>
+      <td>${dot}<strong>${uname}</strong></td>
       <td>${ipCell}</td>
       <td>${activeCell}</td>
       <td>${approvedCell}</td>
