@@ -33,9 +33,13 @@ GITHUB_API = "https://api.github.com"
 ZITADEL_AUTHORIZE_PATH = "/oauth/v2/authorize"
 ZITADEL_TOKEN_PATH = "/oauth/v2/token"
 ZITADEL_USERINFO_PATH = "/oidc/v1/userinfo"
-# Requesting this scope makes Zitadel include the user's roles on the
-# client's project in userinfo, under a claim of the same name:
+# Requesting a role scope ("<prefix><role key>") makes Zitadel assert that
+# role — if the user holds it on the app's own project — in userinfo under
+# ZITADEL_ROLES_CLAIM, independent of the project's "Assert Roles on
+# Authentication" setting:
 #   {"gateway-user": {"<orgId>": "<orgDomain>"}, ...}
+# Note the claim name is NOT a valid scope; Zitadel ignores it as one.
+ZITADEL_ROLE_SCOPE_PREFIX = "urn:zitadel:iam:org:project:role:"
 ZITADEL_ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
 # Usernames key the WG identity, appear in log lines and admin URLs. Allow
 # what Zitadel login names realistically contain (incl. "@" and "."), but
@@ -211,6 +215,13 @@ def create_app(config: dict) -> Flask:
         for key in ("issuer", "client_id", "required_role"):
             if not zitadel_cfg.get(key):
                 raise ValueError(f"oauth.zitadel.{key} is required")
+        # Role keys go into the space-separated scope parameter.
+        zitadel_roles = [zitadel_cfg["required_role"]]
+        if zitadel_cfg.get("admin_role"):
+            zitadel_roles.append(zitadel_cfg["admin_role"])
+        for role in zitadel_roles:
+            if not isinstance(role, str) or not re.fullmatch(r"\S+", role):
+                raise ValueError(f"oauth.zitadel role key {role!r} must be a non-empty string without spaces")
         zitadel_issuer = zitadel_cfg["issuer"].rstrip("/")
         zitadel_org_id = zitadel_cfg.get("required_org_id") or None
         if zitadel_org_id is not None:
@@ -919,7 +930,8 @@ def create_app(config: dict) -> Flask:
         session["zitadel_verifier"] = verifier
         if (nxt := _safe_next(request.args.get("next"))):
             session["oauth_next"] = nxt
-        scopes = ["openid", "profile", ZITADEL_ROLES_CLAIM]
+        scopes = ["openid", "profile"]
+        scopes += [f"{ZITADEL_ROLE_SCOPE_PREFIX}{role}" for role in zitadel_roles]
         if zitadel_org_id:
             # Zitadel then only lets members of that org sign in at all.
             scopes.append(f"urn:zitadel:iam:org:id:{zitadel_org_id}")

@@ -280,8 +280,13 @@ Notes:
   orgs: if the project is ever granted to another org, that org's admins
   could otherwise hand out the same role keys. It also asks Zitadel to
   only allow members of that org to log in.
-- Requested scopes: `openid profile urn:zitadel:iam:org:project:roles`
-  (+ `urn:zitadel:iam:org:id:<id>` when `required_org_id` is set).
+- Requested scopes: `openid profile` plus
+  `urn:zitadel:iam:org:project:role:<key>` for `required_role` and
+  `admin_role` (+ `urn:zitadel:iam:org:id:<id>` when `required_org_id`
+  is set). Asking for the roles by key makes Zitadel return them in
+  userinfo regardless of the project's **Assert Roles on
+  Authentication** setting, so that setting can stay off. Role keys
+  must not contain spaces.
 
 ### No password users?
 

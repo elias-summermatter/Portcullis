@@ -207,9 +207,9 @@ admins: []
 # session also ends when Zitadel's access token expires (default 12h);
 # signing in again is a quick SSO redirect.
 #
-# In the Zitadel console: create a project with the role keys below,
-# add a Web application with authentication method PKCE and the redirect
-# URI
+# In the Zitadel console: create a project with the role keys below
+# (no spaces in keys), add a Web application with authentication method
+# PKCE and the redirect URI
 #     https://<your-gateway-hostname>/oauth/zitadel/callback
 # then grant the roles to users under the project's Authorizations.
 #
