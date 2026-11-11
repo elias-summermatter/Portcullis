@@ -245,8 +245,10 @@ public client — there is no client secret to store on the gateway.
    For a plain-http local test, also add
    `http://localhost:8080/oauth/zitadel/callback` and enable
    **Development Mode** on the app. Copy the **Client ID**.
-4. Under the project's **Authorizations**, grant `gateway-user` (and
-   `gateway-admin` for admins) to the people who need access.
+4. Under the project's **Authorizations**, grant `gateway-user` to the
+   people who need access and `gateway-admin` to admins. Zitadel roles
+   are flat, so `admin_role` grants access on its own — admins don't
+   need both.
 5. Fill in `config.yaml`:
 
    ```yaml

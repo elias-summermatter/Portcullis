@@ -223,6 +223,7 @@ admins: []
 #     client_id: "REPLACE_ME"
 #     required_role: "gateway-user"     # mandatory — startup fails without it
 #     admin_role: "gateway-admin"       # optional: holders get admin in UI
+#                                       # (and access — no need for both)
 #     required_org_id: "123456789"      # optional, recommended on shared
 #                                       # instances: roles only count when
 #                                       # granted in this org

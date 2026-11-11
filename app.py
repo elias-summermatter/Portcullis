@@ -328,11 +328,13 @@ def create_app(config: dict) -> Flask:
         if not isinstance(info, dict):
             raise requests.RequestException("zitadel userinfo is not an object")
         roles = info.get(ZITADEL_ROLES_CLAIM)
-        required_role = zitadel_cfg["required_role"]
-        if not _zitadel_has_role(roles, required_role, zitadel_org_id):
-            return False, False, f"missing zitadel role {required_role}", info
         admin_role = zitadel_cfg.get("admin_role")
+        # Zitadel roles are flat (no hierarchy), so the admin role grants
+        # access on its own — admins needn't also hold required_role.
         is_admin = bool(admin_role) and _zitadel_has_role(roles, admin_role, zitadel_org_id)
+        if not is_admin and not _zitadel_has_role(
+                roles, zitadel_cfg["required_role"], zitadel_org_id):
+            return False, False, "missing zitadel role " + " or ".join(zitadel_roles), info
         return True, is_admin, "", info
 
     def _clear_oauth_session() -> None:
