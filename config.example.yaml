@@ -196,6 +196,39 @@ admins: []
 #     admin_team: "your-admin-team"     # optional: members get admin in UI
 #     reverify_interval: 300            # seconds between membership re-checks
 
+# ---- Zitadel OIDC (optional) -------------------------------------------
+#
+# When enabled, the login page shows a "Sign in with <display_name>"
+# button. Uses the authorization-code flow with PKCE (public client, no
+# client secret). A user is only let in if they hold `required_role` on
+# the Zitadel project the app belongs to. Roles are re-checked against
+# Zitadel's userinfo endpoint every `reverify_interval` seconds, so a
+# deactivated user or a removed role grant kicks the session out. The
+# session also ends when Zitadel's access token expires (default 12h);
+# signing in again is a quick SSO redirect.
+#
+# In the Zitadel console: create a project with the role keys below,
+# add a Web application with authentication method PKCE and the redirect
+# URI
+#     https://<your-gateway-hostname>/oauth/zitadel/callback
+# then grant the roles to users under the project's Authorizations.
+#
+# The username is Zitadel's `preferred_username` (the login name). It
+# shares one namespace with password and GitHub users — the same name
+# from two sources maps to the same WireGuard identity.
+
+# oauth:
+#   zitadel:
+#     issuer: "https://auth.example.com"
+#     client_id: "REPLACE_ME"
+#     required_role: "gateway-user"     # mandatory — startup fails without it
+#     admin_role: "gateway-admin"       # optional: holders get admin in UI
+#     required_org_id: "123456789"      # optional, recommended on shared
+#                                       # instances: roles only count when
+#                                       # granted in this org
+#     display_name: "Zitadel"           # button label: "Sign in with ..."
+#     reverify_interval: 300            # seconds between role re-checks
+
 # ---- Services -----------------------------------------------------------
 #
 # Each entry is a destination reachable through the tunnel once activated.

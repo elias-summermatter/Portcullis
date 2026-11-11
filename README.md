@@ -1,7 +1,7 @@
 # Portcullis
 
 A small self-hosted WireGuard access gateway with a web UI. Users sign in
-(password or GitHub OAuth), download a WireGuard config, and activate
+(password, GitHub OAuth, or Zitadel OIDC), download a WireGuard config, and activate
 per-service access for short sessions. Only the IPs of services they've
 activated are routed through the tunnel; everything else stays on their
 normal connection. Services behind the gateway are completely unreachable
@@ -30,7 +30,8 @@ user, per service, with a time limit.
 
 1. Admin defines services in `config.yaml` — each with a hostname and
    optionally a port.
-2. User logs in to the web UI (password or GitHub OAuth, your choice)
+2. User logs in to the web UI (password, GitHub OAuth, or Zitadel
+   OIDC — your choice)
    and downloads a personal WireGuard config. It includes every
    configured service's resolved IP in `AllowedIPs`, plus the gateway's
    own WG network.
@@ -56,9 +57,10 @@ X25519 keypair, for post-quantum hedging.
 - Per-service activation with configurable expiry (default 1h, cap 8h)
 - Automatic teardown on expiry; existing flows killed via `conntrack -D`
 - Password login + GitHub OAuth (require org and/or team membership,
-  optional admin team)
-- OAuth membership is re-checked on an interval so removing a user from
-  the team kicks their session out
+  optional admin team) + Zitadel OIDC with PKCE (require a project
+  role, optional admin role, optional org pinning)
+- OAuth membership / roles are re-checked on an interval so removing a
+  user from the team or role kicks their session out
 - Admin dashboard:
   - See every user's WG IP, active grants with live countdowns, per-user
     approvals, and blocked services
@@ -116,7 +118,7 @@ cp config.example.yaml config.yaml
 #     - session_cookie_secure: true
 #     - trust_proxy: true
 #     - wg_endpoint: gateway.yourdomain.tld:51820
-#     - users and/or oauth.github
+#     - users and/or oauth.github and/or oauth.zitadel
 #     - services (your real internal hostnames)
 
 # 4. Point a DNS A record at the VM and set the hostname in the Caddyfile.
@@ -195,6 +197,7 @@ documented inline. Highlights:
 | `users`                       | Map of username -> bcrypt password hash.                           |
 | `admins`                      | Usernames with admin privileges.                                   |
 | `oauth.github`                | See section below.                                                 |
+| `oauth.zitadel`               | See section below.                                                 |
 | `services[].hostname`         | Service hostname — resolved at startup + every 5 min.              |
 | `services[].port`             | Optional port restriction. Omit for any TCP port.                  |
 | `services[].cidrs`            | Optional explicit IP/CIDR list, merged with DNS results.           |
@@ -226,10 +229,64 @@ documented inline. Highlights:
 
 The app only requests the `read:org` scope.
 
+### Zitadel (OIDC) setup
+
+Uses the authorization-code flow with PKCE, so the Zitadel app is a
+public client — there is no client secret to store on the gateway.
+
+1. In the Zitadel console, open (or create) a **project** and add the
+   role keys you want to use, e.g. `gateway-user` and `gateway-admin`.
+2. In the project's settings, enable **Check authorization on
+   Authentication** (optional but recommended — Zitadel itself then
+   refuses users without any role on the project).
+3. Add an **application** to the project: type **Web**, authentication
+   method **PKCE**. Redirect URI:
+   `https://<your-gateway-hostname>/oauth/zitadel/callback`.
+   For a plain-http local test, also add
+   `http://localhost:8080/oauth/zitadel/callback` and enable
+   **Development Mode** on the app. Copy the **Client ID**.
+4. Under the project's **Authorizations**, grant `gateway-user` (and
+   `gateway-admin` for admins) to the people who need access.
+5. Fill in `config.yaml`:
+
+   ```yaml
+   oauth:
+     zitadel:
+       issuer: "https://auth.example.com"   # your Zitadel instance
+       client_id: "123456789012345678"
+       required_role: "gateway-user"        # mandatory
+       admin_role: "gateway-admin"          # optional
+       required_org_id: "123456789"         # optional, see below
+       display_name: "Zitadel"              # button label
+       reverify_interval: 300               # seconds
+   ```
+
+Notes:
+
+- **Username** = Zitadel's `preferred_username` (the login name, e.g.
+  `jane@example.com`). Only `A-Z a-z 0-9 . _ @ + -` are accepted; other
+  names are denied at login. Usernames share one namespace with
+  password and GitHub users, so the same name from two sources maps to
+  the same WireGuard identity.
+- **Re-checks** call Zitadel's userinfo endpoint with the user's access
+  token. A deactivated user, a revoked token, or a removed role ends the
+  session on the next check; an unreachable Zitadel does not.
+- **Session length** is capped by Zitadel's access-token lifetime
+  (default 12h, instance setting). After that the user signs in again,
+  which is a silent redirect while their Zitadel SSO session lasts.
+  Active service grants are unaffected.
+- **`required_org_id`** pins roles to one organization (its ID is shown
+  in the org's settings). Recommended when the instance hosts several
+  orgs: if the project is ever granted to another org, that org's admins
+  could otherwise hand out the same role keys. It also asks Zitadel to
+  only allow members of that org to log in.
+- Requested scopes: `openid profile urn:zitadel:iam:org:project:roles`
+  (+ `urn:zitadel:iam:org:id:<id>` when `required_org_id` is set).
+
 ### No password users?
 
 Leave `users: {}` and `admins: []` — the login form will hide the
-password fields automatically, leaving just the GitHub button.
+password fields automatically, leaving just the OAuth button(s).
 
 ---
 
@@ -424,8 +481,9 @@ Then `docker compose restart gateway`.
 
 Either add their username to the `admins:` list in `config.yaml` (and
 restart), or — if you're using GitHub OAuth — add them to the
-`admin_team` in GitHub. The admin team is re-checked periodically
-without a restart.
+`admin_team` in GitHub, or — with Zitadel — grant them the
+`admin_role` on the project. Teams and roles are re-checked
+periodically without a restart.
 
 ### Add a new service
 
@@ -691,7 +749,7 @@ userspace proxy would break the chain of trust.
   internet. WireGuard's UDP port silently drops unauthenticated packets,
   so port scanners can't distinguish it from a closed port.
 - Stealing one credential isn't enough: an attacker needs the login
-  (password or GitHub), an active WG config, and an active per-service
+  (password, GitHub, or Zitadel), an active WG config, and an active per-service
   grant in the last hour. Every piece is revocable from the dashboard.
 - Per-user preshared keys hedge the WG handshake against future
   quantum decryption of recorded traffic.

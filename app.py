@@ -1,5 +1,9 @@
+import base64
+import hashlib
+import hmac
 import logging
 import os
+import re
 import secrets
 import sys
 import time
@@ -22,6 +26,21 @@ from webhooks import FORWARD_HEADERS, WebhookRegistry, verify_github_signature
 GITHUB_AUTHORIZE = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN = "https://github.com/login/oauth/access_token"
 GITHUB_API = "https://api.github.com"
+
+# Zitadel's OIDC endpoints live at fixed paths under the issuer (they match
+# the instance's /.well-known/openid-configuration). Hardcoding them avoids
+# a discovery round-trip and a startup dependency on the IdP being up.
+ZITADEL_AUTHORIZE_PATH = "/oauth/v2/authorize"
+ZITADEL_TOKEN_PATH = "/oauth/v2/token"
+ZITADEL_USERINFO_PATH = "/oidc/v1/userinfo"
+# Requesting this scope makes Zitadel include the user's roles on the
+# client's project in userinfo, under a claim of the same name:
+#   {"gateway-user": {"<orgId>": "<orgDomain>"}, ...}
+ZITADEL_ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
+# Usernames key the WG identity, appear in log lines and admin URLs. Allow
+# what Zitadel login names realistically contain (incl. "@" and "."), but
+# nothing that could smuggle control characters or path separators.
+ZITADEL_USERNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
 
 SESSION_MAX_AGE_SECONDS = 24 * 3600
 MAX_WEBHOOK_BODY = 1 * 1024 * 1024  # 1 MiB cap on incoming webhook bodies
@@ -106,6 +125,36 @@ def _safe_next(target: str | None) -> str | None:
     return target
 
 
+def _pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, S256 code_challenge) per RFC 7636."""
+    verifier = secrets.token_urlsafe(64)  # 86 chars, within the 43..128 limit
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _zitadel_has_role(roles, role: str, org_id: str | None) -> bool:
+    """True if the roles claim grants `role` — in `org_id` when one is set.
+
+    The claim maps role key -> {granting org id -> org domain}. Pinning
+    the org matters on multi-tenant instances: a project granted to
+    another org lets *that* org's admins hand out the same role keys."""
+    if not isinstance(roles, dict):
+        return False
+    orgs = roles.get(role)
+    if not isinstance(orgs, dict) or not orgs:
+        return False
+    return org_id is None or org_id in orgs
+
+
+def _zitadel_username(userinfo: dict) -> str | None:
+    """Gateway username for a Zitadel user, or None if unusable."""
+    name = userinfo.get("preferred_username")
+    if isinstance(name, str) and ZITADEL_USERNAME_RE.fullmatch(name):
+        return name
+    return None
+
+
 def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
@@ -155,7 +204,21 @@ def create_app(config: dict) -> Flask:
     users = config.get("users") or {}
     admins = set(config.get("admins") or [])
     github_cfg = (config.get("oauth") or {}).get("github")
-    reverify_interval = int((github_cfg or {}).get("reverify_interval", 300))
+    zitadel_cfg = (config.get("oauth") or {}).get("zitadel")
+    if zitadel_cfg is not None:
+        # Fail closed: without required_role, any account on the Zitadel
+        # instance (possibly hosting many orgs) could sign in.
+        for key in ("issuer", "client_id", "required_role"):
+            if not zitadel_cfg.get(key):
+                raise ValueError(f"oauth.zitadel.{key} is required")
+        zitadel_issuer = zitadel_cfg["issuer"].rstrip("/")
+        zitadel_org_id = zitadel_cfg.get("required_org_id") or None
+        if zitadel_org_id is not None:
+            zitadel_org_id = str(zitadel_org_id)
+    reverify_intervals = {
+        "github": int((github_cfg or {}).get("reverify_interval", 300)),
+        "zitadel": int((zitadel_cfg or {}).get("reverify_interval", 300)),
+    }
     audit = AuditLog(config.get("audit_log_path"))
     rotation = config.get("audit_rotation", "weekly")
     if rotation in ("weekly", "daily"):
@@ -230,6 +293,49 @@ def create_app(config: dict) -> Flask:
         if admin_team:
             is_admin_via_team, _ = _team_active(admin_team)
         return True, is_admin_via_team, ""
+
+    def _verify_zitadel_access(access_token: str) -> tuple[bool, bool, str, dict]:
+        """Ask Zitadel's userinfo endpoint who the token belongs to and
+        which project roles they currently hold.
+
+        Returns (allowed, is_admin, denial_reason, userinfo). Userinfo is
+        evaluated live by Zitadel, so a deactivated user, a revoked token,
+        or a removed role grant all show up here. Raises
+        requests.RequestException on transient failure (network, 5xx,
+        garbled body) — caller should retry later rather than revoke."""
+        r = requests.get(
+            f"{zitadel_issuer}{ZITADEL_USERINFO_PATH}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        if r.status_code in (401, 403):
+            return False, False, "zitadel token invalid/expired or user deactivated", {}
+        if r.status_code != 200:
+            raise requests.HTTPError(
+                f"zitadel userinfo returned {r.status_code}", response=r)
+        info = r.json()
+        if not isinstance(info, dict):
+            raise requests.RequestException("zitadel userinfo is not an object")
+        roles = info.get(ZITADEL_ROLES_CLAIM)
+        required_role = zitadel_cfg["required_role"]
+        if not _zitadel_has_role(roles, required_role, zitadel_org_id):
+            return False, False, f"missing zitadel role {required_role}", info
+        admin_role = zitadel_cfg.get("admin_role")
+        is_admin = bool(admin_role) and _zitadel_has_role(roles, admin_role, zitadel_org_id)
+        return True, is_admin, "", info
+
+    def _clear_oauth_session() -> None:
+        for key in ("oauth_admin", "oauth_token", "oauth_verified_at",
+                    "oauth_provider", "oauth_sub", "oauth_expires_at"):
+            session.pop(key, None)
+
+    def _login_page(error: str | None = None) -> str:
+        return render_template(
+            "login.html", error=error,
+            github_enabled=github_cfg is not None,
+            zitadel_enabled=zitadel_cfg is not None,
+            zitadel_name=(zitadel_cfg or {}).get("display_name") or "Zitadel",
+            password_enabled=bool(users))
 
     @app.before_request
     def _csrf_origin_check():
@@ -427,12 +533,42 @@ def create_app(config: dict) -> Flask:
         # Always let the user reach logout and static assets.
         if request.endpoint in ("logout", "static", "login"):
             return
+        # Sessions predating multi-provider support carry no provider key.
+        provider = session.get("oauth_provider", "github")
+        if provider == "zitadel" and zitadel_cfg is None:
+            # Provider removed from config — its sessions must not linger.
+            audit.record("session_revoked", user=session.get("user"),
+                         ip=request.remote_addr, via=provider,
+                         reason="zitadel oauth no longer configured")
+            session.clear()
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "session revoked"}), 401
+            return redirect(url_for("login"))
+        # Zitadel access tokens expire (GitHub OAuth App tokens don't). Once
+        # it's gone we can no longer re-check access, so the session ends
+        # with it; the user signs in again (usually a silent SSO bounce).
+        expires_at = session.get("oauth_expires_at")
+        if expires_at and time.time() >= expires_at:
+            audit.record("session_expired", user=session.get("user"),
+                         ip=request.remote_addr, via=provider,
+                         reason="oauth access token expired")
+            session.clear()
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "session expired"}), 401
+            return redirect(url_for("login"))
         last = session.get("oauth_verified_at", 0)
-        if time.time() - last < reverify_interval:
+        if time.time() - last < reverify_intervals.get(provider, 300):
             return
         try:
-            allowed, oauth_admin, reason = _verify_github_access(
-                session["oauth_token"], session["user"])
+            if provider == "zitadel":
+                allowed, oauth_admin, reason, info = _verify_zitadel_access(
+                    session["oauth_token"])
+                if allowed and info.get("sub") != session.get("oauth_sub"):
+                    allowed, oauth_admin = False, False
+                    reason = "zitadel subject changed"
+            else:
+                allowed, oauth_admin, reason = _verify_github_access(
+                    session["oauth_token"], session["user"])
         except requests.RequestException:
             # Transient network/API error — don't punish the user; try again
             # on the next request that crosses the TTL.
@@ -440,7 +576,7 @@ def create_app(config: dict) -> Flask:
         if not allowed:
             user = session.get("user")
             audit.record("session_revoked", user=user, ip=request.remote_addr,
-                         via="github", reason=reason)
+                         via=provider, reason=reason)
             session.clear()
             if request.path.startswith("/api/"):
                 return jsonify({"error": "session revoked"}), 401
@@ -645,9 +781,7 @@ def create_app(config: dict) -> Flask:
         if request.method == "POST":
             if not users:
                 # No password users configured — refuse to even process the form.
-                return render_template("login.html", error="Password login is disabled.",
-                                       github_enabled=github_cfg is not None,
-                                       password_enabled=False), 403
+                return _login_page("Password login is disabled."), 403
             u = request.form.get("username", "")
             p = request.form.get("password", "")
             user = users.get(u)
@@ -655,7 +789,9 @@ def create_app(config: dict) -> Flask:
                 session.permanent = True
                 session["user"] = u
                 session["login_at"] = time.time()
-                session.pop("oauth_admin", None)
+                # Drop any OAuth state from an earlier sign-in, or the
+                # re-check would keep validating that token for this user.
+                _clear_oauth_session()
                 audit.record("login", user=u, ip=request.remote_addr, via="password")
                 # _safe_next() rejects any target with a scheme, netloc, or
                 # protocol-relative prefix — only local absolute paths pass.
@@ -664,9 +800,7 @@ def create_app(config: dict) -> Flask:
             audit.record("login_failed", user=u or None, ip=request.remote_addr,
                          via="password")
             error = "Invalid username or password"
-        return render_template("login.html", error=error,
-                               github_enabled=github_cfg is not None,
-                               password_enabled=bool(users))
+        return _login_page(error)
 
     @app.route("/oauth/github/login")
     @limiter.limit("30 per minute")
@@ -697,14 +831,10 @@ def create_app(config: dict) -> Flask:
         expected_state = session.pop("oauth_state", None)
         next_url = session.pop("oauth_next", None)
         if not expected_state or request.args.get("state") != expected_state:
-            return render_template("login.html",
-                                   error="OAuth state mismatch — please try again.",
-                                   github_enabled=True), 400
+            return _login_page("OAuth state mismatch — please try again."), 400
         code = request.args.get("code")
         if not code:
-            return render_template("login.html",
-                                   error="OAuth callback missing `code`.",
-                                   github_enabled=True), 400
+            return _login_page("OAuth callback missing `code`."), 400
 
         try:
             tok = requests.post(
@@ -723,13 +853,9 @@ def create_app(config: dict) -> Flask:
             access_token = tok.json().get("access_token")
         except requests.RequestException as e:
             app.logger.warning("github token exchange failed: %s", e)
-            return render_template("login.html",
-                                   error="GitHub token exchange failed.",
-                                   github_enabled=True), 502
+            return _login_page("GitHub token exchange failed."), 502
         if not access_token:
-            return render_template("login.html",
-                                   error="GitHub denied the token exchange.",
-                                   github_enabled=True), 400
+            return _login_page("GitHub denied the token exchange."), 400
 
         try:
             user_resp = requests.get(
@@ -743,18 +869,12 @@ def create_app(config: dict) -> Flask:
             )
         except requests.RequestException as e:
             app.logger.warning("github /user fetch failed: %s", e)
-            return render_template("login.html",
-                                   error="GitHub is currently unreachable. Please try again.",
-                                   github_enabled=True), 502
+            return _login_page("GitHub is currently unreachable. Please try again."), 502
         if user_resp.status_code != 200:
-            return render_template("login.html",
-                                   error="Could not read your GitHub profile.",
-                                   github_enabled=True), 502
+            return _login_page("Could not read your GitHub profile."), 502
         login_name = user_resp.json().get("login")
         if not login_name:
-            return render_template("login.html",
-                                   error="GitHub did not return a username.",
-                                   github_enabled=True), 502
+            return _login_page("GitHub did not return a username."), 502
 
         try:
             allowed, oauth_admin, denial_reason = _verify_github_access(
@@ -762,9 +882,7 @@ def create_app(config: dict) -> Flask:
         except requests.RequestException as e:
             app.logger.warning("github membership check failed for %s: %s",
                                login_name, e)
-            return render_template("login.html",
-                                   error="GitHub is currently unreachable. Please try again.",
-                                   github_enabled=True), 502
+            return _login_page("GitHub is currently unreachable. Please try again."), 502
 
         if not allowed:
             # denial_reason names the required org/team — keep it in the
@@ -774,13 +892,13 @@ def create_app(config: dict) -> Flask:
                          via="github", reason=denial_reason)
             app.logger.info("github access denied for %s: %s",
                             login_name, denial_reason)
-            return render_template("login.html",
-                                   error="Access denied. Contact your administrator if you think this is a mistake.",
-                                   github_enabled=True), 403
+            return _login_page("Access denied. Contact your administrator if you think this is a mistake."), 403
 
         session.permanent = True
+        _clear_oauth_session()
         session["user"] = login_name
         session["login_at"] = time.time()
+        session["oauth_provider"] = "github"
         session["oauth_admin"] = oauth_admin
         session["oauth_token"] = access_token
         session["oauth_verified_at"] = time.time()
@@ -788,12 +906,124 @@ def create_app(config: dict) -> Flask:
                      via="github", admin_via_team=oauth_admin or None)
         return redirect(_safe_next(next_url) or url_for("dashboard"))
 
+    @app.route("/oauth/zitadel/login")
+    @limiter.limit("30 per minute")
+    def oauth_zitadel_login():
+        if zitadel_cfg is None:
+            abort(404)
+        # Separate session keys from the GitHub flow so starting one
+        # provider in another tab can't clobber the other's state.
+        state = secrets.token_urlsafe(32)
+        verifier, challenge = _pkce_pair()
+        session["zitadel_state"] = state
+        session["zitadel_verifier"] = verifier
+        if (nxt := _safe_next(request.args.get("next"))):
+            session["oauth_next"] = nxt
+        scopes = ["openid", "profile", ZITADEL_ROLES_CLAIM]
+        if zitadel_org_id:
+            # Zitadel then only lets members of that org sign in at all.
+            scopes.append(f"urn:zitadel:iam:org:id:{zitadel_org_id}")
+        params = {
+            "response_type": "code",
+            "client_id": zitadel_cfg["client_id"],
+            # The IdP needs an absolute redirect_uri that exactly matches
+            # one registered on the app — functional, not a misconfiguration.
+            "redirect_uri": url_for("oauth_zitadel_callback", _external=True),  # nosemgrep: python.flask.security.audit.flask-url-for-external-true.flask-url-for-external-true
+            "scope": " ".join(scopes),
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        return redirect(f"{zitadel_issuer}{ZITADEL_AUTHORIZE_PATH}?{urlencode(params)}")
+
+    @app.route("/oauth/zitadel/callback")
+    @limiter.limit("30 per minute")
+    def oauth_zitadel_callback():
+        if zitadel_cfg is None:
+            abort(404)
+        expected_state = session.pop("zitadel_state", None)
+        verifier = session.pop("zitadel_verifier", None)
+        next_url = session.pop("oauth_next", None)
+        got_state = request.args.get("state", "")
+        if not expected_state or not verifier or not hmac.compare_digest(
+                got_state.encode(), expected_state.encode()):
+            return _login_page("OAuth state mismatch — please try again."), 400
+        if request.args.get("error"):
+            # e.g. access_denied when the project's "check authorization on
+            # authentication" rejects a user without a role grant, or the
+            # user cancelled. Zitadel's error text is not shown verbatim.
+            err = request.args.get("error", "")
+            app.logger.info("zitadel returned error=%s",
+                            err if re.fullmatch(r"[a-z_]{1,64}", err) else "<malformed>")
+            return _login_page("Sign-in was cancelled or denied."), 403
+        code = request.args.get("code")
+        if not code:
+            return _login_page("OAuth callback missing `code`."), 400
+
+        try:
+            tok = requests.post(
+                f"{zitadel_issuer}{ZITADEL_TOKEN_PATH}",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    # Must match the authorize step's redirect_uri.
+                    "redirect_uri": url_for("oauth_zitadel_callback", _external=True),  # nosemgrep: python.flask.security.audit.flask-url-for-external-true.flask-url-for-external-true
+                    "client_id": zitadel_cfg["client_id"],
+                    "code_verifier": verifier,
+                },
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+            tok_body = tok.json() if tok.status_code == 200 else {}
+        except requests.RequestException as e:
+            app.logger.warning("zitadel token exchange failed: %s", e)
+            return _login_page("Sign-in service is currently unreachable. Please try again."), 502
+        access_token = tok_body.get("access_token") if isinstance(tok_body, dict) else None
+        if not access_token:
+            app.logger.warning("zitadel token exchange rejected: HTTP %s", tok.status_code)
+            return _login_page("The sign-in service denied the token exchange."), 400
+        try:
+            expires_in = int(tok_body.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            expires_in = 0
+
+        try:
+            allowed, oauth_admin, denial_reason, info = _verify_zitadel_access(access_token)
+        except requests.RequestException as e:
+            app.logger.warning("zitadel userinfo fetch failed: %s", e)
+            return _login_page("Sign-in service is currently unreachable. Please try again."), 502
+
+        login_name = _zitadel_username(info)
+        sub = info.get("sub")
+        if allowed and (not login_name or not isinstance(sub, str) or not sub):
+            allowed, denial_reason = False, "unusable preferred_username or sub"
+        if not allowed:
+            # Same rule as GitHub: details go to the audit log only, never
+            # to the unauthenticated visitor.
+            audit.record("login_failed", user=login_name, ip=request.remote_addr,
+                         via="zitadel", reason=denial_reason,
+                         sub=sub if isinstance(sub, str) else None)
+            return _login_page("Access denied. Contact your administrator if you think this is a mistake."), 403
+
+        session.permanent = True
+        _clear_oauth_session()
+        session["user"] = login_name
+        session["login_at"] = time.time()
+        session["oauth_provider"] = "zitadel"
+        session["oauth_admin"] = oauth_admin
+        session["oauth_token"] = access_token
+        session["oauth_sub"] = sub
+        session["oauth_verified_at"] = time.time()
+        if expires_in > 0:
+            session["oauth_expires_at"] = time.time() + expires_in
+        audit.record("login", user=login_name, ip=request.remote_addr,
+                     via="zitadel", admin_via_role=oauth_admin or None)
+        return redirect(_safe_next(next_url) or url_for("dashboard"))
+
     @app.route("/logout", methods=["POST"])
     def logout():
         user = session.pop("user", None)
-        session.pop("oauth_admin", None)
-        session.pop("oauth_token", None)
-        session.pop("oauth_verified_at", None)
+        _clear_oauth_session()
         if user:
             audit.record("logout", user=user, ip=request.remote_addr)
         return redirect(url_for("login"))
